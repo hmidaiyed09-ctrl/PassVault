@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+  <div class="app-container">
+
+    <!-- HEADER -->
+    <header>
+      <div class="logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke="#e94560" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round" />
+          <path d="M8 11h8M8 15h8M9 7h6" stroke="#e94560" stroke-width="2" stroke-linecap="round" />
+        </svg>
+        <h1>PassVault <span class="badge">AI</span></h1>
+      </div>
+      <div id="header-actions">
+        <button id="cloudSyncBtn" class="icon-btn" title="Sync with Oracle Cloud" style="display: none;">☁️</button>
+        <button id="settingsBtn" class="icon-btn" title="AI Settings" style="display: none;">⚙️</button>
+        <button id="lockBtn" class="icon-btn" title="Lock Vault" style="display: none;">🔒</button>
+      </div>
+    </header>
+
+    <!-- VIEW: LOGIN / SETUP -->
+    <div id="view-login" class="view active">
+      <div class="auth-container">
+        <h2 id="auth-title">Welcome Back</h2>
+        <p id="auth-subtitle">Enter your master password to decrypt your vault.</p>
+
+        <div class="input-group">
+          <input type="password" id="masterPassword" placeholder="Master Password" autofocus>
+          <button type="button" id="toggleMasterPass" class="toggle-vis-btn">👁️</button>
+        </div>
+
+        <button id="authBtn" class="primary-btn">Unlock Vault</button>
+        <p id="auth-error" class="error-msg"></p>
+
+        <div id="setup-warning" class="warning-box" style="display: none;">
+          ⚠️ <strong>First Time Setup</strong><br>
+          This password encrypts your data. If you lose it, your data is lost forever.
+        </div>
+
+        <!-- Restore from Oracle Cloud -->
+        <div id="cloud-restore-section" style="display: none; width: 100%; margin-top: 8px;">
+          <hr style="border-color: var(--border); margin: 8px 0;">
+          <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">☁️ Have a backup on Oracle Cloud? Restore it:</p>
+          <div class="field-group" style="margin-bottom: 6px;">
+            <input type="text" id="restoreOrdsUrl" placeholder="ORDS Base URL" style="font-size: 12px;">
+          </div>
+          <div class="field-group" style="margin-bottom: 6px;">
+            <input type="text" id="restoreDbUser" placeholder="DB Username (ADMIN)" value="ADMIN" style="font-size: 12px;">
+          </div>
+          <div class="field-group" style="margin-bottom: 6px;">
+            <input type="password" id="restoreDbPass" placeholder="DB Password" style="font-size: 12px;">
+          </div>
+          <button id="restoreFromCloudBtn" class="secondary-btn" style="width: 100%; font-size: 12px;">☁️ Restore from Oracle Cloud</button>
+          <p id="restore-status" class="error-msg" style="margin-top: 4px;"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- VIEW: VAULT LIST -->
+    <div id="view-vault" class="view">
+      <div class="search-bar">
+        <input type="text" id="searchInput" placeholder="Search your vault..." autocomplete="off">
+        <button id="autofillBtn" class="secondary-btn" title="AI Autofill on current tab">🧠 Fill</button>
+      </div>
+
+      <div class="category-bar">
+        <button class="cat-pill active" data-cat="all">All</button>
+        <button class="cat-pill" data-cat="login">🔑 Logins</button>
+        <button class="cat-pill" data-cat="api_key">🔗 API Keys</button>
+        <button class="cat-pill" data-cat="note">📝 Notes</button>
+      </div>
+
+      <div id="entries-list" class="entries-list"></div>
+
+      <div id="ai-status" class="ai-status" style="display: none;">
+        <span class="ai-dot"></span> <span id="ai-status-text">AI Ready</span>
+      </div>
+
+      <div class="fab-group">
+        <div id="fabMenu" class="fab-menu" style="display: none;">
+          <button class="fab-menu-item" data-type="login">🔑 Login Credentials</button>
+          <button class="fab-menu-item" data-type="api_key">🔗 API Key</button>
+          <button class="fab-menu-item" data-type="note">📝 Secure Note</button>
+        </div>
+        <button id="quickSignupFab" class="fab fab-secondary" title="Quick Signup">🚀</button>
+        <button id="addEntryFab" class="fab" title="Add Entry">+</button>
+      </div>
+    </div>
+
+    <!-- VIEW: ADD / EDIT ENTRY -->
+    <div id="view-entry" class="view">
+      <div class="view-header">
+        <button id="backToVaultBtn" class="icon-btn">←</button>
+        <h2 id="entry-title">New Entry</h2>
+      </div>
+
+      <form id="entryForm">
+        <input type="hidden" id="entryId">
+
+        <div class="field-group">
+          <label>Type</label>
+          <div class="input-row">
+            <select id="entryType">
+              <option value="login">🔑 Login Credentials</option>
+              <option value="api_key">🔗 API Key</option>
+              <option value="note">📝 Secure Note</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>Name / Tag</label>
+          <div class="input-row">
+            <input type="text" id="entrySite" placeholder="e.g. google.com or api_openai" required>
+          </div>
+        </div>
+
+        <div id="login-fields">
+          <div class="field-group">
+            <label>Username</label>
+            <div class="input-row">
+              <input type="text" id="entryUser" placeholder="username@email.com">
+              <button type="button" class="copy-input-btn" data-target="entryUser">copy</button>
+            </div>
+          </div>
+          <div class="field-group">
+            <label>Password</label>
+            <div class="input-row">
+              <input type="password" id="entryPass" placeholder="••••••••">
+              <button type="button" id="togglePassVisibility" class="toggle-vis-btn">👁️</button>
+              <button type="button" class="copy-input-btn" data-target="entryPass">copy</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="api-fields" style="display: none;">
+          <div class="field-group">
+            <label>API Key / Value</label>
+            <div class="input-row">
+              <input type="password" id="entryApiKey" placeholder="sk-...">
+              <button type="button" id="toggleApiVisibility" class="toggle-vis-btn">👁️</button>
+              <button type="button" class="copy-input-btn" data-target="entryApiKey">copy</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="note-fields" style="display: none;">
+          <div class="field-group">
+            <label>Secure Note</label>
+            <textarea id="entryNote" placeholder="Enter your secure note..." rows="4"></textarea>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button type="button" id="deleteEntryBtn" class="danger-btn" style="display: none;">Delete</button>
+          <button type="submit" class="primary-btn">Save Entry</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- VIEW: QUICK SIGNUP -->
+    <div id="view-signup" class="view">
+      <div class="view-header">
+        <button id="backFromSignupBtn" class="icon-btn">←</button>
+        <h2>🚀 Quick Signup</h2>
+      </div>
+
+      <p class="view-desc" id="signup-site-label">Fill the fields, we auto-generate a password and save it.</p>
+
+      <form id="signupForm">
+        <div class="signup-row">
+          <div class="field-group half">
+            <label>First Name</label>
+            <input type="text" id="suFirstName" placeholder="John">
+          </div>
+          <div class="field-group half">
+            <label>Last Name</label>
+            <input type="text" id="suLastName" placeholder="Doe">
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>Username</label>
+          <input type="text" id="suUsername" placeholder="johndoe">
+        </div>
+
+        <div class="field-group">
+          <label>Email</label>
+          <input type="email" id="suEmail" placeholder="john@example.com">
+        </div>
+
+        <div class="field-group">
+          <label>Password (auto-generated)</label>
+          <div class="input-row">
+            <input type="text" id="suPassword" readonly>
+            <button type="button" id="regenPasswordBtn" class="toggle-vis-btn" title="Regenerate">🔄</button>
+            <button type="button" class="copy-input-btn" data-target="suPassword">copy</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>Address (optional)</label>
+          <input type="text" id="suAddress" placeholder="123 Main St">
+        </div>
+
+        <div class="signup-row">
+          <div class="field-group half">
+            <label>City</label>
+            <input type="text" id="suCity" placeholder="New York">
+          </div>
+          <div class="field-group half">
+            <label>Phone</label>
+            <input type="text" id="suPhone" placeholder="+1 555 0123">
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="primary-btn signup-submit-btn">🚀 Fill & Save to Vault</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- VIEW: AI SETTINGS -->
+    <div id="view-settings" class="view">
+      <div class="view-header">
+        <button id="backFromSettingsBtn" class="icon-btn">←</button>
+        <h2>AI Settings</h2>
+      </div>
+
+      <div class="settings-form">
+        <div class="field-group">
+          <label>Cohere API Key</label>
+          <div class="input-row">
+            <input type="password" id="cohereApiKey" placeholder="Enter your Cohere API Key">
+            <button type="button" id="toggleCohereKey" class="toggle-vis-btn">👁️</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>DOM Model</label>
+          <div class="input-row">
+            <select id="cohereModel">
+              <option value="command-a-03-2025">command-a-03-2025 (Fast)</option>
+              <option value="command-a-reasoning-08-2025">command-a-reasoning-08-2025 (Smart)</option>
+              <option value="c4ai-aya-vision-32b">c4ai-aya-vision-32b (Vision)</option>
+              <option value="custom">Custom Model ID</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="customModelWrap" class="field-group" style="display: none;">
+          <label>Custom DOM Model ID</label>
+          <div class="input-row">
+            <input type="text" id="customModelId" placeholder="e.g. my-fine-tuned-model">
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>Vision Fallback Model</label>
+          <div class="input-row">
+            <select id="cohereVisionModel">
+              <option value="c4ai-aya-vision-32b">c4ai-aya-vision-32b (Vision)</option>
+              <option value="command-a-reasoning-08-2025">command-a-reasoning-08-2025 (Reasoning)</option>
+              <option value="command-a-03-2025">command-a-03-2025 (Fast)</option>
+              <option value="custom">Custom Model ID</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="customVisionModelWrap" class="field-group" style="display: none;">
+          <label>Custom Vision Model ID</label>
+          <div class="input-row">
+            <input type="text" id="customVisionModelId" placeholder="e.g. my-vision-model">
+          </div>
+        </div>
+
+        <label>AI Behavior</label>
+        <div class="toggle-row">
+          <span>Auto-detect field types</span>
+          <input type="checkbox" id="aiAutoDetect" checked>
+        </div>
+        <div class="toggle-row">
+          <span>Smart API Key Matching</span>
+          <input type="checkbox" id="aiApiMatch" checked>
+        </div>
+        <div class="toggle-row">
+          <span>Enable Vision Fallback</span>
+          <input type="checkbox" id="aiVisionFallback" checked>
+        </div>
+
+        <hr style="border-color: var(--border); margin: 8px 0;">
+        <label style="font-size: 14px; font-weight: 600;">☁️ Oracle Cloud Sync</label>
+
+        <div class="field-group">
+          <label>ORDS Base URL</label>
+          <div class="input-row">
+            <input type="text" id="ordsBaseUrl" placeholder="https://xxx.adb.region.oraclecloudapps.com/ords/admin/">
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>DB Username</label>
+          <div class="input-row">
+            <input type="text" id="ordsUsername" placeholder="ADMIN">
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>DB Password</label>
+          <div class="input-row">
+            <input type="password" id="ordsPassword" placeholder="Your DB password">
+            <button type="button" id="toggleOrdsPass" class="toggle-vis-btn">👁️</button>
+          </div>
+        </div>
+
+        <div class="toggle-row">
+          <span>Auto-sync on save</span>
+          <input type="checkbox" id="cloudAutoSync">
+        </div>
+
+        <button id="saveSettingsBtn" class="primary-btn" style="margin-top: 8px;">Save Settings</button>
+        <p id="settings-status" class="success-msg"></p>
+      </div>
+    </div>
+
+  </div>
+  <script src="popup.js"></script>
+</body>
+
+</html>

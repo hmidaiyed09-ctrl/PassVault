@@ -1,0 +1,979 @@
+// --- AGENT X: AI-POWERED SMART FORM ENGINE ---
+// "MAXIMUM RIGOR & COMPATIBILITY MODE"
+
+const ENGINE_CONFIG = {
+  LOGIN_SIGNALS: ['login', 'sign-in', 'signin', 'log-in', 'user', 'session', 'auth'],
+  SIGNUP_SIGNALS: ['signup', 'sign-up', 'register', 'create', 'join', 'new', 'subscribe', 'account'],
+  TARGET_ATTRS: ['id', 'name', 'class', 'aria-label', 'placeholder']
+};
+
+const PasswordGen = {
+  generate(length = 24) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*_-+=?';
+    const arr = new Uint32Array(length);
+    window.crypto.getRandomValues(arr);
+    return Array.from(arr).map(x => chars[x % chars.length]).join('');
+  }
+};
+const signupMonitors = new WeakSet();
+
+// --- PAGE CONTEXT EXTRACTOR (for AI) ---
+class PageContextExtractor {
+  static extract(scope = document) {
+    const base = scope && typeof scope.querySelectorAll === 'function' ? scope : document;
+    const fields = [], labels = [], buttons = [];
+    const fieldContext = [];
+
+    const findLabel = (el) => {
+      let lbl = '';
+      if (el.id) { const l = document.querySelector(`label[for="${el.id}"]`); if (l) lbl = l.innerText; }
+      if (!lbl) { const p = el.closest('label'); if (p) lbl = p.innerText; }
+      if (!lbl && el.parentElement) {
+        let prev = el.previousElementSibling;
+        while (prev) {
+          if (prev.innerText && prev.innerText.trim().length > 1) { lbl = prev.innerText; break; }
+          prev = prev.previousElementSibling;
+        }
+        if (!lbl) {
+          let pPrev = el.parentElement.previousElementSibling;
+          if (pPrev && pPrev.innerText && pPrev.innerText.trim().length > 1) lbl = pPrev.innerText;
+        }
+      }
+      return lbl ? lbl.trim().replace(/\s+/g, ' ') : '';
+    };
+
+    base.querySelectorAll('input, textarea, select').forEach(el => {
+      if (el.type === 'hidden' || el.type === 'submit') return;
+      const rect = el.getBoundingClientRect();
+      const lText = findLabel(el);
+      const textBefore = this.findNearbyText(el);
+      const selector = this.buildSelector(el);
+      const expectedRole = this.inferFieldRole(el, lText, textBefore);
+
+      fields.push({
+        tag: el.tagName.toLowerCase(),
+        type: el.type || 'text',
+        name: el.name || el.id || '',
+        placeholder: el.placeholder || '',
+        label: lText,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        visible: el.offsetParent !== null
+      });
+      if (lText) labels.push(lText);
+
+      fieldContext.push({
+        selector,
+        type: el.type || 'text',
+        name: el.name || el.id || '',
+        label: lText,
+        placeholder: el.placeholder || '',
+        text_before: textBefore,
+        expected_role: expectedRole
+      });
+    });
+
+    base.querySelectorAll('button, input[type="submit"], [role="button"]').forEach(el => {
+      if (el.offsetParent === null) return;
+      buttons.push({
+        text: (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().substring(0, 30),
+        id: el.id || ''
+      });
+    });
+
+    const headingText = Array.from(base.querySelectorAll('h1, h2, h3, [role="heading"], .title'))
+      .map((el) => (el.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase())
+      .filter(Boolean)
+      .slice(0, 8);
+
+    const scopeText = (base.innerText || '').replace(/\s+/g, ' ').toLowerCase();
+    const pageSignals = {
+      signup_phrase: /(sign up|signup|create account|register|get started|join)/.test(scopeText),
+      login_phrase: /(sign in|signin|log in|login)/.test(scopeText),
+      has_confirm_password: /confirm password|repeat password|retype password|verify password/.test(scopeText)
+    };
+
+    return {
+      url: window.location.href,
+      title: document.title,
+      fields: fields.slice(0, 30),
+      fieldContext: fieldContext.slice(0, 40),
+      labels: labels.slice(0, 20),
+      buttons: buttons.slice(0, 8),
+      headings: headingText,
+      pageSignals,
+      textSnippet: (base.innerText || document.body.innerText || '').substring(0, 1200).replace(/\s+/g, ' ').trim()
+    };
+  }
+
+  static buildSelector(el) {
+    if (!el || !el.tagName) return '';
+    if (el.id) return `#${el.id}`;
+    if (el.name) return `${el.tagName.toLowerCase()}[name="${el.name}"]`;
+    const tag = el.tagName.toLowerCase();
+    const classes = (el.className || '').toString().trim().split(/\s+/).filter(Boolean).slice(0, 2);
+    if (classes.length) return `${tag}.${classes.join('.')}`;
+    const parent = el.parentElement;
+    if (!parent) return tag;
+    const idx = Array.from(parent.children).filter(c => c.tagName === el.tagName).indexOf(el) + 1;
+    return `${parent.tagName.toLowerCase()} > ${tag}:nth-of-type(${Math.max(idx, 1)})`;
+  }
+
+  static findNearbyText(el) {
+    if (!el) return '';
+    const chunks = [];
+    const pushText = (t) => {
+      const v = (t || '').replace(/\s+/g, ' ').trim();
+      if (v) chunks.push(v);
+    };
+
+    let prev = el.previousElementSibling;
+    while (prev) {
+      pushText(prev.innerText);
+      prev = prev.previousElementSibling;
+      if (chunks.length >= 2) break;
+    }
+
+    const parent = el.parentElement;
+    if (parent) {
+      pushText(parent.getAttribute('aria-label'));
+      const parentTxt = (parent.innerText || '').replace(/\s+/g, ' ').trim();
+      if (parentTxt) pushText(parentTxt.substring(0, 120));
+    }
+
+    return chunks.join(' | ').substring(0, 220);
+  }
+
+  static inferFieldRole(el, label = '', nearby = '') {
+    const type = (el?.type || '').toLowerCase();
+    if (type === 'password') return 'password';
+    if (type === 'email') return 'email';
+    if (type === 'tel') return 'phone';
+
+    const attr = `${el?.id || ''} ${el?.name || ''} ${el?.placeholder || ''} ${el?.getAttribute?.('aria-label') || ''} ${label || ''} ${nearby || ''}`.toLowerCase();
+    if (/(full name|your name|name)/.test(attr) && !/(user ?name|login)/.test(attr)) return 'full_name';
+    if (/(first|given|forename|fname)/.test(attr)) return 'first_name';
+    if (/(last|family|surname|lname)/.test(attr)) return 'last_name';
+    if (/(email|mail)/.test(attr)) return 'email';
+    if (/(user ?name|login|handle|nick|account id)/.test(attr)) return 'username';
+    if (/(phone|mobile|tel|cell|whatsapp)/.test(attr)) return 'phone';
+    if (/(address|street|city|zip|postal)/.test(attr)) return 'address';
+    return 'unknown';
+  }
+}
+
+// --- INTERFACE INJECTOR ---
+class InterfaceInjector {
+  constructor() {
+    this.processedInputs = new WeakSet();
+    this.observer = null;
+    this.init();
+  }
+
+  init() {
+    this.flushPendingSignupOnLoad();
+    this.scan();
+    this.observer = new MutationObserver((mutations) => {
+      let shouldScan = false;
+      for (const m of mutations) {
+        if (m.addedNodes.length > 0 || m.type === 'attributes') { shouldScan = true; break; }
+      }
+      if (shouldScan) this.scan();
+    });
+    this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'hidden'] });
+    setTimeout(() => this.scan(), 1000);
+    setTimeout(() => this.scan(), 3000);
+    window.addEventListener('hashchange', () => this.flushPendingSignupOnLoad());
+    window.addEventListener('popstate', () => this.flushPendingSignupOnLoad());
+  }
+
+  flushPendingSignupOnLoad() {
+    chrome.runtime.sendMessage({
+      action: 'flush_pending_signup',
+      currentUrl: window.location.href
+    }, () => { });
+  }
+
+  scan() {
+    // Aggressive scan for all potential credential inputs
+    const inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"])');
+    inputs.forEach(input => {
+      if (input.dataset.passvault) return; // Already processed
+      if (this.isLikelyCredentialField(input)) this.processInput(input);
+    });
+  }
+
+  isLikelyCredentialField(input) {
+    if (input.offsetWidth < 10 || input.offsetHeight < 10) return false;
+    const attrStr = ((input.id || '') + ' ' + (input.name || '') + ' ' + (input.placeholder || '') + ' ' + (input.getAttribute('aria-label') || '') + ' ' + (input.autocomplete || '')).toLowerCase();
+
+    if (attrStr.includes('search') || attrStr.includes('query')) return false;
+
+    const signals = ['user', 'login', 'email', 'mail', 'password', 'pass', 'pwd', 'account', 'username', 'name', 'phone', 'first', 'last', 'join', 'register'];
+    if (signals.some(s => attrStr.includes(s))) return true;
+
+    const form = input.closest('form');
+    if (form && form.querySelector('input[type="password"]')) return true;
+    return false;
+  }
+
+  processInput(input) {
+    if (this.processedInputs.has(input)) return;
+    this.injectTray(input);
+    this.processedInputs.add(input);
+    input.dataset.passvault = "true";
+  }
+
+  injectTray(input) {
+    if (input.parentNode.querySelector('.passvault-icon')) return;
+
+    const icon = document.createElement('div');
+    icon.className = 'passvault-icon';
+    icon.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="3" y="11" width="18" height="11" rx="2" stroke="white" stroke-width="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4" stroke="white" stroke-width="2"/><circle cx="12" cy="16" r="2" fill="#7c3aed"/></svg>`;
+
+    Object.assign(icon.style, {
+      position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)',
+      cursor: 'pointer', opacity: '0.6', zIndex: '2147483647',
+      background: 'linear-gradient(135deg, #0f3460, #7c3aed)', borderRadius: '4px', padding: '4px',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      transition: 'opacity 0.2s, transform 0.2s', width: '24px', height: '24px', pointerEvents: 'auto',
+      boxShadow: '0 2px 5px rgba(0,0,0,0.2)'
+    });
+
+    icon.onmouseenter = () => { icon.style.opacity = '1'; icon.style.transform = 'translateY(-50%) scale(1.1)'; };
+    icon.onmouseleave = () => { icon.style.opacity = '0.6'; icon.style.transform = 'translateY(-50%) scale(1)'; };
+
+    icon.onclick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      this.handleIconClick(input);
+    };
+
+    let parent = input.parentElement;
+    if (!parent) return;
+    if (parent.tagName === 'LABEL') return; // Don't break labels
+    if (window.getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+    parent.appendChild(icon);
+  }
+
+  handleIconClick(input) {
+    this.showToast("⚡ Agent Analysis...", true, true);
+
+    const form = input.closest('form');
+    const contextRoot = this.findSignupScope(input, form);
+    const root = form || contextRoot;
+    const intent = this.evaluateIntentContext(root, input);
+    let isSignup = intent.isSignup;
+
+    // Absolute Login Guard: If URL is login-like, force false unless it's obviously a signup form
+    const url = window.location.href.toLowerCase();
+    const isLoginUrl = /(login|signin|sign-in|log-in|account\/signin|auth\/login|auth\/signin|session\/new)/.test(url);
+    if (isLoginUrl && !/(confirm|register|signup|sign-up|create)/.test(url)) {
+      // Keep signup mode when strong signup cues are present (e.g. "Sign up with email", "Create account")
+      if (!intent.strongSignup) isSignup = false;
+    }
+
+    console.log("Agent X: Mode ->", isSignup ? "SIGNUP" : "LOGIN");
+
+    if (isSignup) {
+      this.triggerSignupFill(form, contextRoot);
+    } else {
+      this.triggerAIAutofill({
+        scope: root,
+        input,
+        onNoMatch: () => {
+          const fallbackIntent = this.evaluateIntentContext(form || contextRoot, input);
+          // On login-like URLs, allow fallback only with strong signup signals.
+          if (isLoginUrl && !fallbackIntent.strongSignup) return false;
+
+          const signupFallback = fallbackIntent.isSignup;
+          const hasPassword = !!(form || contextRoot || document).querySelector('input[type="password"]');
+          if (signupFallback || hasPassword) {
+            this.showToast("🚀 No match. Scanning for signup patterns...", true);
+            this.triggerSignupFill(form, contextRoot);
+            return true;
+          }
+          return false;
+        }
+      });
+    }
+  }
+
+  findSignupScope(input, form = null) {
+    if (form) return form;
+    if (!input) return document;
+
+    const signupPattern = /(create account|sign up|signup|register|join|get started|continue|next|create my account|sign-up)/;
+    const loginPattern = /(sign in|signin|log in|login)/;
+    let best = null;
+    let bestScore = -Infinity;
+    let current = input.parentElement;
+
+    while (current && current !== document.body) {
+      const inputs = current.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"])');
+      const submitEls = current.querySelectorAll('button, input[type="submit"], [role="button"]');
+      const submitText = Array.from(submitEls)
+        .map(el => `${el.innerText || ''} ${el.value || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase().trim())
+        .join(' ');
+      const text = (current.innerText || '').replace(/\s+/g, ' ').toLowerCase().substring(0, 800);
+      let score = 0;
+      if (inputs.length >= 2) score += 4;
+      if (signupPattern.test(submitText)) score += 5;
+      if (signupPattern.test(text)) score += 4;
+      if (loginPattern.test(submitText)) score -= 2;
+      if (/sign up with email/.test(text)) score += 6;
+
+      if (score > bestScore) {
+        best = current;
+        bestScore = score;
+      }
+
+      current = current.parentElement;
+    }
+
+    return best || document;
+  }
+
+  detectSignupContext(scope, input = null) {
+    return this.evaluateIntentContext(scope, input).isSignup;
+  }
+
+  evaluateIntentContext(scope, input = null) {
+    const root = scope || this.findSignupScope(input);
+    if (!root) return { isSignup: false, strongSignup: false, signupScore: 0, loginScore: 0 };
+
+    const url = window.location.href.toLowerCase();
+    const isLoginUrl = /(login|signin|sign-in|log-in|account\/signin|auth\/login|auth\/signin|session\/new)/.test(url);
+    const isSignupUrl = /(signup|sign-up|register|create-account|join|new-account|auth\/register)/.test(url);
+
+    const inputs = Array.from(root.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"])'));
+    const passwordFields = inputs.filter(i => i.type === 'password' && i.offsetParent !== null);
+
+    // Check for confirm signals
+    const hasConfirmSignal = inputs.some(i => {
+      const attr = `${i.name || ''} ${i.id || ''} ${i.placeholder || ''} ${i.getAttribute('aria-label') || ''} ${i.autocomplete || ''}`.toLowerCase();
+      return /(confirm|repeat|retype|verify|password_confirmation|pass2)/.test(attr);
+    });
+
+    // 2. Per-field hints
+    const inputAutocomplete = (input?.autocomplete || '').toLowerCase();
+    if (inputAutocomplete.includes('new-password')) {
+      return { isSignup: true, strongSignup: true, signupScore: 9, loginScore: 0 };
+    }
+    if (inputAutocomplete.includes('current-password')) {
+      return { isSignup: false, strongSignup: false, signupScore: 0, loginScore: 8 };
+    }
+
+    // 3. Form Signals
+    const visibleInputs = inputs.filter(i => i.offsetParent !== null);
+    const hasTwoPasswords = passwordFields.length >= 2;
+    let hasSignupIdentityFields = false;
+    let hasEmailField = false;
+
+    for (const i of visibleInputs) {
+      const attr = `${i.name || ''} ${i.id || ''} ${i.placeholder || ''} ${i.getAttribute('aria-label') || ''}`.toLowerCase();
+      if (/(first|last|full[\s_-]*name|your[\s_-]*name|address|city|phone|mobile|zip|postal)/.test(attr)) hasSignupIdentityFields = true;
+      if (i.type === 'email' || /email|mail/.test(attr)) hasEmailField = true;
+    }
+
+    const submitEls = Array.from(root.querySelectorAll('button, input[type="submit"], [role="button"]'))
+      .filter(el => el.offsetParent !== null);
+    const submitText = submitEls
+      .map(el => `${el.innerText || ''} ${el.value || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase().trim())
+      .join(' ');
+
+    const hasSignupSubmit = /(create account|sign up|signup|register|join|get started|create my account|sign-up)/.test(submitText);
+    const hasLoginSubmit = /(log in|login|sign in|signin|log-in|sign-in)/.test(submitText);
+    const headingText = Array.from(root.querySelectorAll('h1, h2, h3, [role="heading"], .title'))
+      .map((el) => (el.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase())
+      .join(' ');
+    const rootText = (root.innerText || '').replace(/\s+/g, ' ').toLowerCase();
+    const hasSignupHeading = /(sign up|signup|create account|register|get started|join)/.test(headingText) ||
+      /(sign up with email|create account|join now|register)/.test(rootText);
+    const hasLoginHeading = /(sign in|signin|log in|login)/.test(headingText);
+
+    let signupScore = 0;
+    let loginScore = 0;
+    if (isSignupUrl) signupScore += 4;
+    if (isLoginUrl) loginScore += 3;
+    if (hasTwoPasswords) signupScore += 4;
+    if (hasConfirmSignal) signupScore += 3;
+    if (hasSignupSubmit) signupScore += 4;
+    if (hasLoginSubmit) loginScore += 3;
+    if (hasSignupHeading) signupScore += 4;
+    if (hasLoginHeading) loginScore += 2;
+    if (hasSignupIdentityFields) signupScore += 2;
+    if (hasEmailField) signupScore += 1;
+    if (visibleInputs.length >= 2 && hasEmailField && hasSignupIdentityFields) signupScore += 3;
+    if (visibleInputs.length <= 2 && hasLoginSubmit && !hasSignupHeading && !hasSignupSubmit) loginScore += 2;
+    if (/(already have an account|back to sign up options)/.test(rootText)) signupScore += 2;
+    if (/(forgot password|remember me)/.test(rootText)) loginScore += 2;
+
+    const strongSignup = signupScore >= 6 && signupScore >= loginScore;
+    const isSignup = signupScore >= 4 && signupScore >= loginScore;
+    return { isSignup, strongSignup, signupScore, loginScore };
+  }
+
+  triggerSignupFill(form, scope = null, opts = {}) {
+    const targetScope = form || scope || document;
+
+    chrome.runtime.sendMessage({ action: 'is_unlocked' }, (state) => {
+      if (!state || !state.unlocked) {
+        this.showToast("⚠️ Vault locked. Unlock PassVault first.", false);
+        return;
+      }
+
+      chrome.storage.local.get('userProfile', (res) => {
+        if (res.userProfile) {
+          const p = res.userProfile;
+          const password = PasswordGen.generate(24);
+
+          const filler = new SignupFiller({
+            firstName: p.firstName, lastName: p.lastName,
+            username: p.username, email: p.email,
+            address: p.address, city: p.city, phone: p.phone,
+            password: password,
+            aiFieldHints: Array.isArray(opts.aiFieldHints) ? opts.aiFieldHints : []
+          });
+
+          const filledCount = filler.fill();
+
+          if (filledCount > 0) {
+            const detail = filledCount === 1 ? "Field" : "Fields";
+            this.showToast(`🚀 ${filledCount} ${detail} Filled!`, true);
+
+            this.monitorSignupSubmission(targetScope, p.email, p.username, password, p);
+          } else {
+            if (opts.skipAIFallback) {
+              this.showToast("⚠️ Signup detected but no compatible fields found", false);
+            } else {
+              console.warn("Retrying as Login...");
+              this.triggerAIAutofill({ scope: targetScope });
+            }
+          }
+        } else {
+          this.showToast("⚠️ Setup Identity First", false);
+        }
+      });
+    });
+  }
+
+  monitorSignupSubmission(scope, defaultEmail, defaultUser, generatedPass, profile) {
+    if (!scope || signupMonitors.has(scope)) return;
+    signupMonitors.add(scope);
+
+    let captured = false;
+    const finish = () => {
+      if (captured) return;
+      captured = true;
+      signupMonitors.delete(scope);
+      setTimeout(() => this.captureAndSave(scope, defaultEmail, defaultUser, generatedPass, profile, { deferUntilUrlChange: true }), 120);
+    };
+
+    if (scope.tagName === 'FORM') {
+      scope.addEventListener('submit', finish, { once: true });
+      scope.querySelectorAll('button, input[type="submit"], [role="button"]').forEach((b) => {
+        b.addEventListener('click', () => setTimeout(finish, 10), { once: true });
+      });
+      return;
+    }
+
+    const clickHandler = (evt) => {
+      const btn = evt.target?.closest?.('button, input[type="submit"], [role="button"]');
+      if (!btn) return;
+      const txt = `${btn.innerText || ''} ${btn.value || ''} ${btn.getAttribute('aria-label') || ''}`.toLowerCase().trim();
+      if (/(create account|sign up|signup|register|join|get started|continue|next|submit|verify)/.test(txt)) {
+        setTimeout(finish, 10);
+      }
+    };
+
+    const keyHandler = (evt) => {
+      if (evt.key === 'Enter') setTimeout(finish, 10);
+    };
+
+    scope.addEventListener('click', clickHandler, true);
+    scope.addEventListener('keydown', keyHandler, true);
+
+    setTimeout(() => {
+      scope.removeEventListener('click', clickHandler, true);
+      scope.removeEventListener('keydown', keyHandler, true);
+      signupMonitors.delete(scope);
+    }, 90000);
+  }
+
+  waitForNavigationAndFlush(startUrl, timeoutMs = 12000) {
+    const handleFlushResponse = (res) => {
+      if (!res || res.success) return;
+      if (res.error === 'OVERWRITE_CONFIRM_REQUIRED') {
+        this.showToast("⚠️ Overwrite confirmation required. Click icon again.", false);
+      }
+    };
+
+    const startedAt = Date.now();
+    const poll = setInterval(() => {
+      const nowUrl = window.location.href;
+      if (nowUrl !== startUrl) {
+        clearInterval(poll);
+        chrome.runtime.sendMessage({ action: 'flush_pending_signup', currentUrl: nowUrl }, handleFlushResponse);
+        return;
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        clearInterval(poll);
+        chrome.runtime.sendMessage({ action: 'flush_pending_signup', currentUrl: nowUrl, force: true }, handleFlushResponse);
+      }
+    }, 300);
+  }
+
+  captureAndSave(form, defaultEmail, defaultUser, generatedPass, profile, opts = {}) {
+    // Permissive Capture: If the user clicked the icon, they WANT to save. 
+    // We only guard against obviously non-credential forms.
+    const inputs = Array.from((form || document).querySelectorAll('input'));
+    const passwordFields = inputs.filter(i => i.type === 'password' && i.value);
+    if (passwordFields.length === 0 && !generatedPass) return;
+
+    const visibleInputs = inputs.filter(i => i.offsetParent !== null || i.getClientRects().length > 0);
+    const visiblePass = visibleInputs.find(i => i.type === 'password' && i.value);
+    const anyPass = inputs.find(i => i.type === 'password' && i.value);
+    const finalPass = (visiblePass ? visiblePass.value : null) || (anyPass ? anyPass.value : null) || generatedPass;
+
+    // Find username/email (Weighted search)
+    const em = inputs.find(i => (i.type === 'email' || /email|mail/.test((i.name + i.id).toLowerCase())) && i.value);
+    const us = inputs.find(i => /user|login|handle|id/.test((i.name + i.id).toLowerCase()) && i.value);
+
+    let finalUser = (em ? em.value : null) || (us ? us.value : null) || defaultEmail || defaultUser || "user";
+
+    // Safety: If it's a generic "user" and we have a generated pass, it might be a partial capture.
+    if (!finalUser && profile?.email) finalUser = profile.email;
+
+    const action = opts.deferUntilUrlChange ? 'queue_signup_pending' : 'save_signup';
+    const entry = {
+      site: window.location.hostname.replace('www.', ''),
+      user: finalUser,
+      pass: finalPass,
+      type: 'login',
+      meta: { ...profile }
+    };
+
+    const sendSaveRequest = (overwriteConfirmed = false) => {
+      chrome.runtime.sendMessage({
+        action,
+        startUrl: window.location.href,
+        overwriteConfirmed,
+        entry
+      }, (response) => {
+        if (response && response.success) {
+          if (opts.deferUntilUrlChange) {
+            const msg = response.overwritten
+              ? "💾 Captured. Will overwrite after redirect..."
+              : "💾 Captured. Saving after redirect...";
+            this.showToast(msg, true);
+            this.waitForNavigationAndFlush(window.location.href);
+          } else if (response.overwritten) {
+            this.showToast("💾 Credential updated", true);
+          } else {
+            this.showToast("💾 Captured & Saved!", true);
+          }
+          return;
+        }
+
+        if (response && response.error === 'OVERWRITE_CONFIRM_REQUIRED') {
+          const existing = response.existing || {};
+          const labelSite = existing.site || entry.site;
+          const labelUser = existing.user || entry.user || 'unknown user';
+          const ok = window.confirm(`A credential already exists for ${labelSite} (${labelUser}). Overwrite it?`);
+          if (ok) {
+            sendSaveRequest(true);
+          } else {
+            this.showToast("↩️ Kept existing credential", true);
+          }
+          return;
+        }
+
+        if (response && response.error === 'LOCKED') {
+          this.showToast("⚠️ Vault locked. Unlock PassVault first.", false);
+        } else {
+          this.showToast("❌ Save failed", false);
+        }
+      });
+    };
+
+    sendSaveRequest(!!opts.overwriteConfirmed);
+  }
+
+  triggerAIAutofill(options = {}) {
+    const pageContext = PageContextExtractor.extract(options.scope || document);
+    chrome.runtime.sendMessage({ action: 'request_ai_autofill', pageContext }, (response) => {
+      if (response && response.success) {
+        if (response.method === 'vision') this.showToast('👁️ Vision Autofilled', true);
+        else this.showToast(response.method === 'ai' ? '🧠 AI Autofilled' : '🔑 Autofilled', true);
+      } else {
+        if (response && response.error === 'SIGNUP_PAGE') {
+          const targetScope = options.scope || this.findSignupScope(options.input || null);
+          this.showToast("🧠 AI detected signup flow", true);
+          this.triggerSignupFill(null, targetScope, {
+            skipAIFallback: true,
+            aiFieldHints: response.inputRoles || []
+          });
+          return;
+        }
+        chrome.runtime.sendMessage({ action: 'request_autofill' }, (res) => {
+          if (res && res.success) {
+            this.showToast("🔑 Autofilled", true);
+          } else if (typeof options.onNoMatch === 'function') {
+            const handled = options.onNoMatch();
+            if (!handled) this.showToast("❌ No Match", false);
+          } else {
+            this.showToast("❌ No Match", false);
+          }
+        });
+      }
+    });
+  }
+
+  showToast(msg, success, loading = false) {
+    const existing = document.querySelector('.passvault-toast');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.className = 'passvault-toast';
+    toast.textContent = msg;
+    Object.assign(toast.style, {
+      position: 'fixed', top: '20px', right: '20px',
+      background: success ? '#1a1a2e' : (loading ? '#0f3460' : '#e94560'),
+      color: 'white', padding: '12px 24px', borderRadius: '8px', zIndex: '2147483647',
+      fontFamily: '-apple-system, sans-serif', fontSize: '13px', fontWeight: 'bold',
+      boxShadow: '0 4px 16px rgba(0,0,0,0.5)', border: `1px solid ${success ? '#7c3aed' : '#e94560'}`
+    });
+    document.body.appendChild(toast);
+    if (!loading) setTimeout(() => toast.remove(), 3000);
+  }
+}
+
+new InterfaceInjector();
+
+// --- HIGH-COMPATIBILITY FILLER ---
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'fillCredentials') {
+    const engine = new FormFiller(msg.user, msg.pass, msg.type, msg.fieldMapping);
+    sendResponse({ success: engine.fill() });
+  }
+  if (msg.action === 'fillSignup') {
+    const filler = new SignupFiller(msg.data);
+    sendResponse({ success: filler.fill() });
+  }
+});
+
+class SignupFiller {
+  constructor(data) { this.data = data || {}; }
+
+  static FIELD_MAP = [
+    { key: 'email', patterns: ['email', 'mail', 'address', 'login'], inputType: 'email' },
+    { key: 'password', patterns: ['pass', 'pwd', 'secret', 'clue'], inputType: 'password' },
+    { key: 'firstName', patterns: ['first', 'given', 'fname', 'forename'] },
+    { key: 'lastName', patterns: ['last', 'family', 'lname', 'surname'] },
+    { key: 'fullName', patterns: ['fullname', 'display', 'name', 'profile'], labelOnly: true },
+    { key: 'username', patterns: ['user', 'login', 'handle', 'id', 'username', 'nick'] },
+    { key: 'phone', patterns: ['phone', 'tel', 'mobile', 'cell', 'whatsapp', 'sms'], inputType: 'tel' }
+  ];
+
+  fill() {
+    const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="submit"])'));
+    const visibleInputs = inputs.filter(el => this.isInputVisible(el));
+    let count = 0;
+    const used = new Set();
+
+    // 0. AI-guided hints first (if available)
+    count += this.fillUsingAIHints(used);
+
+    // 1. Handle Names (Smart Branching)
+    const firstNameField = this.match(visibleInputs, SignupFiller.FIELD_MAP.find(f => f.key === 'firstName'), used);
+    const lastNameField = this.match(visibleInputs, SignupFiller.FIELD_MAP.find(f => f.key === 'lastName'), used);
+    const genericNameField = this.match(visibleInputs, SignupFiller.FIELD_MAP.find(f => f.key === 'fullName'), used);
+
+    if (firstNameField && lastNameField) {
+      if (this.data.firstName) { this.simulateTyping(firstNameField, this.data.firstName); used.add(firstNameField); count++; }
+      if (this.data.lastName) { this.simulateTyping(lastNameField, this.data.lastName); used.add(lastNameField); count++; }
+    } else if (genericNameField && !used.has(genericNameField)) {
+      const full = `${this.data.firstName || ''} ${this.data.lastName || ''}`.trim();
+      if (full) {
+        this.simulateTyping(genericNameField, full);
+        used.add(genericNameField);
+        count++;
+      }
+    } else if (firstNameField && !used.has(firstNameField)) {
+      // Fallback: If only "firstName" matched (likely because it's labeled "Name")
+      const full = `${this.data.firstName || ''} ${this.data.lastName || ''}`.trim();
+      this.simulateTyping(firstNameField, full);
+      used.add(firstNameField);
+      count++;
+    }
+
+    // 2. Handle Remainder
+    for (const field of SignupFiller.FIELD_MAP) {
+      if (['firstName', 'lastName', 'fullName'].includes(field.key)) continue;
+      const val = this.data[field.key];
+      if (!val) continue;
+
+      const el = this.match(visibleInputs, field, used);
+      if (el) {
+        if (field.key === 'username') {
+          const attr = (el.name + el.id + el.placeholder).toLowerCase();
+          if (attr.includes('email') || attr.includes('mail')) continue;
+        }
+
+        this.simulateTyping(el, val);
+        used.add(el);
+        count++;
+      }
+    }
+
+    // 3. Confirm Passwords
+    if (this.data.password) {
+      count += this.fillAllPasswordFields(this.data.password, used);
+      this.scheduleConfirmPasswordRetry(this.data.password);
+    }
+
+    return count;
+  }
+
+  valueForRole(role) {
+    const fullName = `${this.data.firstName || ''} ${this.data.lastName || ''}`.trim();
+    const map = {
+      full_name: fullName,
+      first_name: this.data.firstName || '',
+      last_name: this.data.lastName || '',
+      email: this.data.email || '',
+      username: this.data.username || '',
+      password: this.data.password || '',
+      phone: this.data.phone || '',
+      address: this.data.address || ''
+    };
+    return map[role] || '';
+  }
+
+  findByHintSelector(selector) {
+    if (!selector || typeof selector !== 'string') return null;
+    try {
+      const found = document.querySelector(selector);
+      if (found) return found;
+    } catch { /* noop */ }
+
+    const idMatch = selector.match(/^#(.+)/);
+    if (idMatch) {
+      const rawId = idMatch[1];
+      try {
+        return document.getElementById(rawId) || null;
+      } catch { /* noop */ }
+    }
+    return null;
+  }
+
+  fillUsingAIHints(used) {
+    const hints = Array.isArray(this.data.aiFieldHints) ? this.data.aiFieldHints : [];
+    if (!hints.length) return 0;
+    let count = 0;
+
+    for (const hint of hints) {
+      const role = (hint?.role || hint?.expected_role || '').toLowerCase();
+      const selector = hint?.selector || '';
+      if (!role || !selector || role === 'unknown') continue;
+      const val = this.valueForRole(role);
+      if (!val) continue;
+      const el = this.findByHintSelector(selector);
+      if (!el || used.has(el) || !this.isInputFillable(el)) continue;
+      this.simulateTyping(el, val);
+      used.add(el);
+      count++;
+    }
+
+    return count;
+  }
+
+  isInputVisible(el) {
+    if (!el) return false;
+    if (!el.isConnected || el.disabled) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (el.offsetParent !== null) return true;
+    return el.getClientRects().length > 0;
+  }
+
+  isInputFillable(el) {
+    if (!this.isInputVisible(el)) return false;
+    if (el.readOnly) return false;
+    if (el.type === 'hidden' || el.type === 'submit' || el.type === 'button') return false;
+    return true;
+  }
+
+  fillAllPasswordFields(password, used = null) {
+    const passwordFields = Array.from(document.querySelectorAll('input[type="password"]'))
+      .filter(el => this.isInputFillable(el));
+    let count = 0;
+
+    passwordFields.forEach((pf) => {
+      if (used && used.has(pf)) return;
+      const needsFill = !pf.value || pf.value !== password;
+      if (!needsFill) return;
+      this.simulateTyping(pf, password);
+      if (used) used.add(pf);
+      count++;
+    });
+
+    return count;
+  }
+
+  scheduleConfirmPasswordRetry(password) {
+    const retryMs = [120, 350, 800];
+    retryMs.forEach((delay) => {
+      setTimeout(() => {
+        const passwordFields = Array.from(document.querySelectorAll('input[type="password"]'))
+          .filter(el => this.isInputFillable(el));
+
+        passwordFields.forEach((pf) => {
+          const attr = `${pf.name || ''} ${pf.id || ''} ${pf.placeholder || ''} ${pf.getAttribute('aria-label') || ''} ${pf.autocomplete || ''}`.toLowerCase();
+          const looksLikeConfirm = /(confirm|repeat|retype|again|verify)/.test(attr) || attr.includes('new-password');
+          if (looksLikeConfirm || !pf.value || pf.value !== password) {
+            this.simulateTyping(pf, password);
+          }
+        });
+      }, delay);
+    });
+  }
+
+  match(inputs, field, used) {
+    if (!field) return null;
+
+    // 1. Exact Input Type (Strongest)
+    if (field.inputType) {
+      const m = inputs.find(i => i.type === field.inputType && !used.has(i));
+      if (m) return m;
+    }
+
+    // 2. Attributes (Weighted)
+    for (const i of inputs) {
+      if (used.has(i)) continue;
+      const id = (i.id || '').toLowerCase();
+      const name = (i.name || '').toLowerCase();
+      const ph = (i.placeholder || '').toLowerCase();
+      const al = (i.getAttribute('aria-label') || '').toLowerCase();
+      const ac = (i.autocomplete || '').toLowerCase();
+      const attrStr = `${id} ${name} ${ph} ${al} ${ac}`;
+
+      if (field.patterns.some(p => {
+        // Strict boundary check for common terms to avoid 'name' matching 'username'
+        if (p === 'name') {
+          return /(^|\s|_)name(_|\s|$)/.test(attrStr) || id === 'name' || name === 'name';
+        }
+        return attrStr.includes(p);
+      })) return i;
+    }
+
+    // 3. Label Text (Standard and Deep Recursive)
+    for (const i of inputs) {
+      if (used.has(i)) continue;
+      const lbl = this.findLabelText(i);
+      if (lbl && field.patterns.some(p => {
+        const lowerLbl = lbl.toLowerCase();
+        if (p === 'name') return /(^|\s|_)name(\s|$|\*)/.test(lowerLbl);
+        return lowerLbl.includes(p);
+      })) return i;
+    }
+
+    return null;
+  }
+
+  findLabelText(i) {
+    let lbl = '';
+    // Standard label
+    if (i.id) { const l = document.querySelector(`label[for="${i.id}"]`); if (l) lbl = l.innerText; }
+    if (!lbl) { const p = i.closest('label'); if (p) lbl = p.innerText; }
+
+    // Recursive nearby text search (up to 3 levels)
+    if (!lbl) {
+      let current = i;
+      for (let depth = 0; depth < 3; depth++) {
+        if (!current || current === document.body) break;
+
+        // Scan siblings above
+        let prev = current.previousElementSibling;
+        while (prev) {
+          if (prev.innerText && prev.innerText.trim().length > 1) {
+            lbl = prev.innerText;
+            break;
+          }
+          prev = prev.previousElementSibling;
+        }
+        if (lbl) break;
+
+        // Move to parent
+        current = current.parentElement;
+      }
+    }
+
+    return lbl ? lbl.trim().replace(/\s+/g, ' ') : '';
+  }
+
+  // THE NUCLEAR SETTER - REACT COMPATIBLE
+  simulateTyping(element, value) {
+    element.focus();
+    element.value = ''; // Clear first
+
+    // 1. Try React Internal Setters
+    const proto = Object.getPrototypeOf(element);
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) {
+      setter.call(element, value);
+    } else {
+      element.value = value;
+    }
+
+    // 2. Dispatch Input Events sequence
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+
+    // 3. Fallback for older React/Angular
+    // Sometimes typing one char triggers handlers
+    if (element.value !== value) {
+      element.value = value;
+      element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: value[0] }));
+      element.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, key: value[0] }));
+      element.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: value[0] }));
+    }
+
+    element.blur();
+  }
+}
+
+class FormFiller extends SignupFiller {
+  // Inherit typo simulation for login too
+  constructor(user, pass, type) { super({}); this.user = user; this.pass = pass; }
+  fill() {
+    let c = 0;
+    const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"])'));
+    const passIn = inputs.find(i => i.type === 'password' && i.offsetParent);
+
+    if (passIn) {
+      this.simulateTyping(passIn, this.pass);
+      c++;
+      // Find user input before password
+      const idx = inputs.indexOf(passIn);
+      let userIn = null;
+      // Look backwards for user field
+      for (let i = idx - 1; i >= 0; i--) {
+        const inp = inputs[i];
+        if (inp.type === 'password') continue;
+        if (inp.offsetParent) { userIn = inp; break; }
+      }
+      if (userIn && this.user) {
+        this.simulateTyping(userIn, this.user);
+        c++;
+      }
+    } else {
+      // No password field (maybe email only step)
+      if (this.user) {
+        const userIn = inputs.find(i => (i.type === 'email' || i.type === 'text') && i.offsetParent);
+        if (userIn) { this.simulateTyping(userIn, this.user); c++; }
+      }
+    }
+    return c > 0;
+  }
+}
