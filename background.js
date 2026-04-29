@@ -118,9 +118,16 @@ const VaultCrypto = {
   KEY_LEN: 256,
 
   strToBuf: (str) => new TextEncoder().encode(str),
+  bufToStr: (buf) => new TextDecoder().decode(buf),
   genSalt: () => crypto.getRandomValues(new Uint8Array(16)),
   genIV: () => crypto.getRandomValues(new Uint8Array(12)),
   bufferToBase64: (buf) => btoa(String.fromCharCode(...buf)),
+  base64ToBuffer: (str) => {
+    const binary = atob(str);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  },
 
   async deriveKey(password, salt) {
     const keyMaterial = await crypto.subtle.importKey(
@@ -147,6 +154,17 @@ const VaultCrypto = {
       iv: this.bufferToBase64(iv),
       content: this.bufferToBase64(new Uint8Array(encryptedContent))
     };
+  },
+
+  async decrypt(encryptedPkg, password) {
+    const salt = this.base64ToBuffer(encryptedPkg.salt);
+    const iv = this.base64ToBuffer(encryptedPkg.iv);
+    const content = this.base64ToBuffer(encryptedPkg.content);
+    const key = await this.deriveKey(password, salt);
+    const decryptedBuffer = await crypto.subtle.decrypt(
+      { name: this.ALGO_NAME, iv }, key, content
+    );
+    return JSON.parse(this.bufToStr(decryptedBuffer));
   }
 };
 
@@ -520,6 +538,63 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     aiSettings = null;
     sendResponse({ success: true });
     return;
+  }
+
+  if (msg.action === 'unlock_with_password') {
+    const password = typeof msg.password === 'string' ? msg.password : '';
+    if (!password) {
+      sendResponse({ success: false, error: "EMPTY_PASSWORD" });
+      return;
+    }
+
+    chrome.storage.local.get(['secureVault', 'secureSettings', 'aiSettings'], async (result) => {
+      if (!result.secureVault) {
+        sendResponse({ success: false, error: "NO_VAULT" });
+        return;
+      }
+
+      try {
+        const decryptedVault = await VaultCrypto.decrypt(result.secureVault, password);
+        if (!Array.isArray(decryptedVault)) {
+          sendResponse({ success: false, error: "CORRUPTED_VAULT" });
+          return;
+        }
+        const defaults = {
+          apiKey: '',
+          model: 'command-a-03-2025',
+          customModelId: '',
+          domModel: 'command-a-03-2025',
+          customDomModelId: '',
+          visionModel: 'c4ai-aya-vision-32b',
+          customVisionModelId: '',
+          enableVisionFallback: true,
+          autoDetect: true,
+          apiMatch: true
+        };
+
+        let loadedSettings = defaults;
+        if (result.secureSettings) {
+          try {
+            const decryptedSettings = await VaultCrypto.decrypt(result.secureSettings, password);
+            loadedSettings = { ...defaults, ...decryptedSettings };
+          } catch (settingsErr) {
+            console.warn("Secure settings decrypt failed during in-page unlock:", settingsErr);
+            if (result.aiSettings) loadedSettings = { ...defaults, ...result.aiSettings };
+          }
+        } else if (result.aiSettings) {
+          loadedSettings = { ...defaults, ...result.aiSettings };
+        }
+
+        sessionVault = decryptedVault;
+        masterPassword = password;
+        aiSettings = loadedSettings;
+        sendResponse({ success: true, unlocked: true });
+      } catch (err) {
+        sendResponse({ success: false, error: "BAD_PASSWORD" });
+      }
+    });
+
+    return true;
   }
 
   if (msg.action === 'is_unlocked') {

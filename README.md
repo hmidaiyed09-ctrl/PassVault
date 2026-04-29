@@ -15,6 +15,7 @@ PassVault AI combines three major capabilities:
 2. **Smart autofill and signup assistance**
    - Detects auth pages and injects fill actions on login/signup forms.
    - Uses rule-based detection and fallback logic for compatibility across many websites.
+   - If the vault is locked, clicking the injected field icon opens an in-page unlock prompt (master password) before autofill continues.
    - Supports AI-assisted field analysis (DOM context and optional vision fallback via Cohere models).
    - Provides quick signup flow with generated passwords and profile-based field filling.
    - Captures new signup credentials and stores them back into the vault with conflict checks.

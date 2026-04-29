@@ -184,6 +184,7 @@ class InterfaceInjector {
   constructor() {
     this.processedInputs = new WeakSet();
     this.observer = null;
+    this.unlockPromptPromise = null;
     this.init();
   }
 
@@ -274,7 +275,186 @@ class InterfaceInjector {
     parent.appendChild(icon);
   }
 
-  handleIconClick(input) {
+  ensureUnlockedBeforeAutofill() {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'is_unlocked' }, (state) => {
+        if (state && state.unlocked) {
+          resolve(true);
+          return;
+        }
+        this.showUnlockPrompt().then(resolve);
+      });
+    });
+  }
+
+  showUnlockPrompt() {
+    if (this.unlockPromptPromise) return this.unlockPromptPromise;
+
+    this.unlockPromptPromise = new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      const card = document.createElement('div');
+      const title = document.createElement('h3');
+      const subtitle = document.createElement('p');
+      const input = document.createElement('input');
+      const error = document.createElement('p');
+      const actions = document.createElement('div');
+      const cancelBtn = document.createElement('button');
+      const unlockBtn = document.createElement('button');
+
+      const close = (ok) => {
+        overlay.remove();
+        this.unlockPromptPromise = null;
+        resolve(ok);
+      };
+
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        inset: '0',
+        background: 'rgba(5, 8, 20, 0.6)',
+        zIndex: '2147483647',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '20px'
+      });
+
+      Object.assign(card.style, {
+        width: 'min(360px, 92vw)',
+        background: '#16213e',
+        border: '1px solid #0f3460',
+        borderRadius: '12px',
+        padding: '16px',
+        boxShadow: '0 14px 38px rgba(0, 0, 0, 0.45)',
+        color: '#e0e0e0',
+        fontFamily: 'Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif'
+      });
+
+      Object.assign(title.style, { margin: '0 0 8px', fontSize: '18px', color: '#e94560' });
+      title.textContent = 'Unlock PassVault';
+
+      Object.assign(subtitle.style, { margin: '0 0 12px', fontSize: '13px', color: '#8892b0' });
+      subtitle.textContent = 'Enter your master password to continue autofill.';
+
+      input.type = 'password';
+      input.placeholder = 'Master Password';
+      input.autocomplete = 'current-password';
+      Object.assign(input.style, {
+        width: '100%',
+        height: '40px',
+        borderRadius: '8px',
+        border: '1px solid #0f3460',
+        background: '#1a1a2e',
+        color: '#e0e0e0',
+        padding: '0 12px',
+        fontSize: '13px',
+        outline: 'none'
+      });
+
+      Object.assign(error.style, { margin: '8px 0 0', minHeight: '16px', color: '#ff4d4d', fontSize: '12px' });
+
+      Object.assign(actions.style, { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '12px' });
+
+      cancelBtn.type = 'button';
+      cancelBtn.textContent = 'Cancel';
+      Object.assign(cancelBtn.style, {
+        height: '36px',
+        borderRadius: '8px',
+        border: '1px solid #0f3460',
+        background: '#1a1a2e',
+        color: '#e0e0e0',
+        padding: '0 12px',
+        cursor: 'pointer'
+      });
+
+      unlockBtn.type = 'button';
+      unlockBtn.textContent = 'Unlock';
+      Object.assign(unlockBtn.style, {
+        height: '36px',
+        borderRadius: '8px',
+        border: 'none',
+        background: '#e94560',
+        color: 'white',
+        padding: '0 14px',
+        cursor: 'pointer',
+        fontWeight: '600'
+      });
+
+      const submit = () => {
+        const password = input.value;
+        if (!password) {
+          error.textContent = 'Password cannot be empty.';
+          return;
+        }
+
+        error.textContent = 'Unlocking...';
+        unlockBtn.disabled = true;
+        cancelBtn.disabled = true;
+
+        chrome.runtime.sendMessage({ action: 'unlock_with_password', password }, (response) => {
+          unlockBtn.disabled = false;
+          cancelBtn.disabled = false;
+
+          if (chrome.runtime.lastError) {
+            error.textContent = 'Unlock failed. Try again.';
+            return;
+          }
+
+          if (response && response.success) {
+            close(true);
+            this.showToast("🔓 Vault unlocked", true);
+            return;
+          }
+
+          if (response && response.error === 'BAD_PASSWORD') {
+            error.textContent = 'Incorrect password.';
+            input.value = '';
+            input.focus();
+            return;
+          }
+
+          if (response && response.error === 'NO_VAULT') {
+            error.textContent = 'No vault found. Open the extension popup and create one first.';
+            return;
+          }
+
+          if (response && response.error === 'CORRUPTED_VAULT') {
+            error.textContent = 'Vault data is invalid. Open the extension popup and restore from backup.';
+            return;
+          }
+
+          error.textContent = 'Unlock failed. Try again.';
+        });
+      };
+
+      overlay.addEventListener('click', (evt) => {
+        if (evt.target === overlay) close(false);
+      });
+      cancelBtn.addEventListener('click', () => close(false));
+      unlockBtn.addEventListener('click', submit);
+      input.addEventListener('keydown', (evt) => {
+        if (evt.key === 'Enter') submit();
+        if (evt.key === 'Escape') close(false);
+      });
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(unlockBtn);
+      card.appendChild(title);
+      card.appendChild(subtitle);
+      card.appendChild(input);
+      card.appendChild(error);
+      card.appendChild(actions);
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      input.focus();
+    });
+
+    return this.unlockPromptPromise;
+  }
+
+  async handleIconClick(input) {
+    const unlocked = await this.ensureUnlockedBeforeAutofill();
+    if (!unlocked) return;
+
     this.showToast("⚡ Agent Analysis...", true, true);
 
     const form = input.closest('form');
