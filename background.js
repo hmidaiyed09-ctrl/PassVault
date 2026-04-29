@@ -179,39 +179,78 @@ RULES:
 - You NEVER see actual passwords, API keys, or secrets
 - You only see NAMES/TAGS of saved credentials
 - You analyze the page URL, form structure, and visible text
+- You will receive a "url_page_type" field that classifies the page based on its URL pattern:
+  - "login" = URL contains /login, /signin, /sign-in
+  - "signup" = URL contains /signup, /sign-up, /register
+  - "auth" = URL contains /auth (generic auth page)
+  - "unknown" = No auth pattern detected in URL
+- The url_page_type is a STRONG signal but should be combined with form analysis
 - ${modeHint}
 - You return a JSON command
 
-RESPONSE FORMAT (strict JSON only, no markdown):
+RESPONSE FORMAT - You MUST return EXACTLY this JSON structure with no extra text:
 {
-  "action": "fill_or_none (use exactly fill or none)",
-  "page_intent": "signup_or_login_or_unknown (use exactly signup or login or unknown)",
-  "confidence": 0.95,
-  "credential_name": "the_best_matching_credential_name_or_null",
-  "reasoning": "brief explanation",
-  "field_mapping": {
-    "username_selector": "suggested CSS selector or null",
-    "password_selector": "suggested CSS selector or null"
+  "thinking": {
+    "is_login_or_signup_and_why": "Answer: Is this a login or signup page? Explain why based on visual evidence.",
+    "what_labels_detected": "Answer: What labels/placeholders did the user get asked to enter? List each field label.",
+    "is_signup_and_why": "Answer: Is this specifically a signup page? Why? Reference form fields and URL.",
+    "what_we_need": "List what fields are needed based on the page. Say 'nothing' if all fields are visible.",
+    "is_enough_info_and_why": "Answer: Is the information we have enough to fill all fields? Explain literally."
   },
-  "input_roles": [
-    {"selector": "css selector", "role": "full_name|first_name|last_name|email|username|password|phone|address|unknown", "reason": "short reason"}
-  ],
-  "form_type": "login_or_signup_or_unknown (use exactly login or signup or unknown)"
+  "answer": {
+    "is_signup": true,
+    "is_login": false,
+    "field_values": {
+      "#email": "user@example.com",
+      "#name": "Iyed",
+      "#password": "auto_generated_password"
+    },
+    "field_labels": ["Email", "Name", "Password"],
+    "is_enough_info": true,
+    "ui_instructions": {
+      "show_tray": true,
+      "show_icon": true,
+      "highlight_fields": ["email", "password"],
+      "toast_message": "Fields filled!"
+    },
+    "reasoning": "Brief explanation of your decision."
+  }
 }
 
 If no match found:
-{"action": "none", "page_intent": "signup_or_login_or_unknown", "reasoning": "why no match", "input_roles": []}
+{
+  "thinking": { ...same structure... },
+  "answer": {
+    "is_signup": false,
+    "is_login": false,
+    "field_values": {},
+    "field_labels": [],
+    "is_enough_info": false,
+    "ui_instructions": { "show_tray": false, "show_icon": false, "highlight_fields": [], "toast_message": "No match" },
+    "reasoning": "why no match"
+  }
+}
 
 IMPORTANT:
-- If page intent is signup and no vault credential should be used, return action "none", page_intent "signup", and include input_roles.
-- Never choose a credential for signup intent unless explicitly requested by context.`;
+- "field_values" maps CSS selectors to the actual VALUES to insert into each field.
+- Use available user profile data (name, email, etc.) to fill fields.
+- For signup pages, generate appropriate values (e.g., strong password).
+- If page intent is signup and no vault credential should be used, return action "none" with is_signup true.
+- Never choose a credential for signup intent unless explicitly requested by context.
+- When url_page_type is "login", strongly prefer is_login true and is_signup false.
+- When url_page_type is "signup", strongly prefer is_signup true and is_login false.
+- The "ui_instructions" object tells the content script how to adjust the UI.
+- NEVER return markdown or text outside the JSON.`;
   },
 
   buildUserPrompt(pageContext, credentialNames) {
     const fieldContext = Array.isArray(pageContext.fieldContext) ? pageContext.fieldContext : [];
     const headings = Array.isArray(pageContext.headings) ? pageContext.headings : [];
     const pageSignals = pageContext.pageSignals || {};
+    const urlPageType = pageContext.urlPageType || 'unknown';
+
     return `PAGE URL: ${pageContext.url}
+PAGE TYPE (from URL): ${urlPageType}
 PAGE TITLE: ${pageContext.title}
 VISIBLE FORM FIELDS: ${JSON.stringify(pageContext.fields)}
 FIELD CONTEXT (selector + nearby text): ${JSON.stringify(fieldContext)}
@@ -224,7 +263,65 @@ PAGE TEXT SNIPPET: ${pageContext.textSnippet}
 SAVED CREDENTIAL NAMES (you can only pick from these):
 ${credentialNames.map(c => `- "${c.name}" (type: ${c.type})`).join('\n')}
 
-Classify page intent first (signup/login/unknown), then decide credential action. Return JSON only.`;
+Answer these in your thinking section:
+1. Is this a login or signup page and why?
+2. What labels did they tell the user to enter?
+3. Is this specifically a signup page and why?
+4. What do we need to fill?
+5. Is the information we have enough? (literally say that)
+
+Page type "${urlPageType}" is a strong signal. Return JSON only.`;
+  },
+
+  // --- VISION MODEL: Structured screenshot analysis ---
+  buildVisionSystemPrompt() {
+    return `You are PassVault Vision AI. You analyze screenshots of web pages to determine login/signup intent and required fields.
+
+RESPONSE FORMAT - You MUST return EXACTLY this JSON structure with no extra text:
+{
+  "thinking": {
+    "is_login_or_signup_and_why": "Answer: Is this a login or signup page? Explain why based on visual evidence.",
+    "what_labels_detected": "Answer: What labels/placeholders did the user get asked to enter? List each field label."
+  },
+  "answer": {
+    "is_signup": true,
+    "is_login": false,
+    "field_labels": ["Email", "Password"],
+    "is_enough_info": true,
+    "what_we_need": "List what fields are needed based on the page. Say 'nothing' if all fields are visible.",
+    "reasoning": "Brief explanation of your decision."
+  }
+}
+
+RULES:
+- is_signup: true ONLY if the page clearly asks for registration (create account, sign up, register)
+- is_login: true if the page asks for existing credentials to sign in
+- field_labels: list ALL visible field labels/placeholders
+- is_enough_info: true if you can see all required fields to fill
+- what_we_need: describe missing info if is_enough_info is false
+- NEVER return markdown or text outside the JSON`;
+  },
+
+  buildVisionUserPrompt(pageContext, userInfo) {
+    const urlPageType = pageContext.urlPageType || 'unknown';
+    const apiKeys = userInfo.apiKeys || {};
+    const loginInfo = userInfo.login || {};
+
+    return `PAGE TYPE (from URL): ${urlPageType}
+PAGE URL: ${pageContext.url}
+PAGE TITLE: ${pageContext.title}
+
+YOUR AVAILABLE CONTEXT:
+- API Keys: ${JSON.stringify(apiKeys)}
+- Login Info: ${JSON.stringify(loginInfo)}
+- User Info: ${JSON.stringify(userInfo.userProfile || {})}
+
+Based on the screenshot and this context, answer:
+1. Is this a signup page and why?
+2. What do we need to fill?
+3. Is the information we have enough to fill all fields?
+
+Return JSON only.`;
   },
 
   async analyzeWithModel(pageContext, credentialNames, settings, modelId, mode) {
@@ -299,14 +396,86 @@ Classify page intent first (signup/login/unknown), then decide credential action
       return domResult;
     }
 
-    const visionResult = await this.analyzeWithModel(pageContext, credentialNames, settings, visionModel, 'vision');
-    if (visionResult && visionResult.action === 'fill' && visionResult.credential_name) {
+    const visionResult = await this.analyzeVision(pageContext, credentialNames, settings, visionModel);
+    if (visionResult && visionResult.answer && visionResult.answer.is_signup) {
+      return { ...visionResult, stage: 'vision' };
+    }
+    if (visionResult && visionResult.answer && visionResult.answer.action === 'fill' && visionResult.answer.credential_name) {
       return { ...visionResult, stage: 'vision' };
     }
     if (visionResult && !visionResult.stage) visionResult.stage = 'vision';
 
     if (domResult && !domResult.error) return domResult;
     return visionResult?.error ? { ...domResult, vision_error: visionResult.error } : visionResult;
+  },
+
+  // --- VISION ANALYSIS: Screenshot-based analysis with structured JSON ---
+  async analyzeVision(pageContext, credentialNames, settings, modelId) {
+    if (!modelId) return { error: 'NO_VISION_MODEL' };
+    if (!settings || !settings.apiKey) return { error: 'NO_AI_KEY' };
+
+    const systemPrompt = this.buildVisionSystemPrompt();
+    const userInfo = settings.userInfo || {};
+    const userPrompt = this.buildVisionUserPrompt(pageContext, userInfo);
+
+    // Capture screenshot if image provided
+    const imageData = pageContext.screenshotBase64;
+
+    try {
+      const messages = [
+        { role: 'system', content: systemPrompt }
+      ];
+
+      // If we have a screenshot, send it as an image
+      if (imageData) {
+        messages.push({
+          role: 'user',
+          content: [
+            { type: 'image', image_url: { url: `data:image/png;base64,${imageData}` } },
+            { type: 'text', text: userPrompt }
+          ]
+        });
+      } else {
+        messages.push({ role: 'user', content: userPrompt });
+      }
+
+      const response = await fetch('https://api.cohere.com/v2/chat', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${settings.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: modelId,
+          messages: messages,
+          temperature: 0.1,
+          max_tokens: 800
+        })
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error('Vision AI API Error:', response.status, errText);
+        return { error: 'API_ERROR', detail: errText };
+      }
+
+      const data = await response.json();
+      let aiText = '';
+      if (data.message && data.message.content) {
+        for (const block of data.message.content) {
+          if (block.type === 'text') aiText += block.text;
+        }
+      }
+
+      const jsonMatch = aiText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+      }
+      return { error: 'PARSE_ERROR', raw: aiText };
+    } catch (e) {
+      console.error('Vision AI Error:', e);
+      return { error: 'NETWORK_ERROR', detail: e.message };
+    }
   }
 };
 
@@ -443,22 +612,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
 
-        const intentRaw = `${aiResult.page_intent || aiResult.form_type || ''}`.toLowerCase();
-        const aiDetectsSignup = /(signup|register|create)/.test(intentRaw);
-        if (aiDetectsSignup) {
+        // New structure: use answer.is_signup directly
+        const answer = aiResult.answer || {};
+        const thinking = aiResult.thinking || {};
+        const aiIsSignup = answer.is_signup || false;
+        const aiIsLogin = answer.is_login || false;
+        const uiInstructions = answer.ui_instructions || {};
+
+        if (aiIsSignup) {
           sendResponse({
             success: false,
             error: "SIGNUP_PAGE",
             method: aiResult.stage === 'vision' ? 'vision' : 'ai',
-            reasoning: aiResult.reasoning || '',
-            inputRoles: Array.isArray(aiResult.input_roles) ? aiResult.input_roles : []
+            reasoning: thinking.is_signup_and_why || answer.reasoning || '',
+            thinking: thinking,
+            answer: answer,
+            ui_instructions: uiInstructions,
+            field_values: answer.field_values || {},
+            field_labels: answer.field_labels || [],
+            is_enough_info: answer.is_enough_info || false
           });
           return;
         }
 
-        if (aiResult.action === 'fill' && aiResult.credential_name) {
+        if (answer.action === 'fill' && answer.credential_name) {
           // AI found a match - look up actual credentials locally
-          const match = pickBestVaultEntry(sessionVault, aiResult.credential_name);
+          const match = pickBestVaultEntry(sessionVault, answer.credential_name);
 
           if (match) {
             chrome.tabs.sendMessage(sender.tab.id, {
@@ -466,15 +645,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               user: match.user || '',
               pass: match.pass || match.apiKey || '',
               type: match.type || 'login',
-              fieldMapping: aiResult.field_mapping || null,
-              aiConfidence: aiResult.confidence
+              fieldMapping: answer.field_mapping || null,
+              aiConfidence: answer.confidence,
+              ui_instructions: uiInstructions,
+              field_values: answer.field_values || {}
             });
-            sendResponse({ success: true, method: aiResult.stage === 'vision' ? 'vision' : 'ai', confidence: aiResult.confidence });
+            sendResponse({
+              success: true,
+              method: aiResult.stage === 'vision' ? 'vision' : 'ai',
+              confidence: answer.confidence,
+              thinking: thinking,
+              answer: answer
+            });
           } else {
-            sendResponse({ success: false, error: "AI_NO_MATCH", reasoning: aiResult.reasoning });
+            sendResponse({
+              success: false,
+              error: "AI_NO_MATCH",
+              reasoning: answer.reasoning,
+              thinking: thinking,
+              answer: answer,
+              ui_instructions: uiInstructions
+            });
           }
         } else {
-          sendResponse({ success: false, error: "AI_DECLINED", reasoning: aiResult.reasoning });
+          sendResponse({
+            success: false,
+            error: "AI_DECLINED",
+            reasoning: answer.reasoning,
+            thinking: thinking,
+            answer: answer,
+            ui_instructions: uiInstructions
+          });
         }
       })
       .catch(err => {

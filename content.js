@@ -7,6 +7,22 @@ const ENGINE_CONFIG = {
   TARGET_ATTRS: ['id', 'name', 'class', 'aria-label', 'placeholder']
 };
 
+// --- URL-BASED AUTH PAGE DETECTION ---
+function isAuthPageUrl(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return /(\/login|\/signup|\/signin|\/sign-up|\/register|\/auth)/.test(lower);
+}
+
+function getPageType(url) {
+  if (!url) return "unknown";
+  const lower = url.toLowerCase();
+  if (/\/login|\/signin|\/sign-in/.test(lower)) return "login";
+  if (/\/signup|\/sign-up|\/register/.test(lower)) return "signup";
+  if (/\/auth/.test(lower)) return "auth";
+  return "unknown";
+}
+
 const PasswordGen = {
   generate(length = 24) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*_-+=?';
@@ -95,6 +111,7 @@ class PageContextExtractor {
 
     return {
       url: window.location.href,
+      urlPageType: getPageType(window.location.href),
       title: document.title,
       fields: fields.slice(0, 30),
       fieldContext: fieldContext.slice(0, 40),
@@ -219,6 +236,8 @@ class InterfaceInjector {
 
   processInput(input) {
     if (this.processedInputs.has(input)) return;
+    // Only inject icon on auth pages (login/signup)
+    if (!isAuthPageUrl(window.location.href)) return;
     this.injectTray(input);
     this.processedInputs.add(input);
     input.dataset.passvault = "true";
@@ -264,15 +283,14 @@ class InterfaceInjector {
     const intent = this.evaluateIntentContext(root, input);
     let isSignup = intent.isSignup;
 
-    // Absolute Login Guard: If URL is login-like, force false unless it's obviously a signup form
-    const url = window.location.href.toLowerCase();
-    const isLoginUrl = /(login|signin|sign-in|log-in|account\/signin|auth\/login|auth\/signin|session\/new)/.test(url);
-    if (isLoginUrl && !/(confirm|register|signup|sign-up|create)/.test(url)) {
-      // Keep signup mode when strong signup cues are present (e.g. "Sign up with email", "Create account")
-      if (!intent.strongSignup) isSignup = false;
-    }
+    // Use URL-based page type detection
+    const pageType = getPageType(window.location.href);
+    console.log("Agent X: Page type ->", pageType, "| URL:", window.location.href);
 
-    console.log("Agent X: Mode ->", isSignup ? "SIGNUP" : "LOGIN");
+    // Force login mode on login URLs
+    if (pageType === "login") isSignup = false;
+    // Force signup mode on signup URLs
+    if (pageType === "signup") isSignup = true;
 
     if (isSignup) {
       this.triggerSignupFill(form, contextRoot);
@@ -282,8 +300,9 @@ class InterfaceInjector {
         input,
         onNoMatch: () => {
           const fallbackIntent = this.evaluateIntentContext(form || contextRoot, input);
-          // On login-like URLs, allow fallback only with strong signup signals.
-          if (isLoginUrl && !fallbackIntent.strongSignup) return false;
+          // On login URLs, allow fallback only with strong signup signals
+          const fallbackPageType = getPageType(window.location.href);
+          if (fallbackPageType === "login" && !fallbackIntent.strongSignup) return false;
 
           const signupFallback = fallbackIntent.isSignup;
           const hasPassword = !!(form || contextRoot || document).querySelector('input[type="password"]');
