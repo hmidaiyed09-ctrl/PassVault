@@ -712,8 +712,30 @@ class InterfaceInjector {
 
     await this.deterministicAutofill(input);
     
-    // After autofill, also try to capture any filled credentials in the form (for signup)
-    this.tryCaptureFilledCredentials(input);
+    // Detect if this is a signup form (two password fields = confirm password)
+    const scope = input.closest('form') || document;
+    const isSignup = this.detectSignupForm(scope);
+    
+    if (isSignup) {
+      // On signup, capture filled credentials and queue for save
+      this.tryCaptureFilledCredentials(input);
+    }
+  }
+
+  detectSignupForm(scope) {
+    const inputs = Array.from(scope.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"])'));
+    const passwordFields = inputs.filter(i => i.type === 'password' && i.offsetParent !== null);
+    
+    // Two visible password fields = signup with confirm password
+    if (passwordFields.length >= 2) return true;
+    
+    // Or check for confirm password attributes
+    const hasConfirmSignal = inputs.some(i => {
+      const attr = `${i.name || ''} ${i.id || ''} ${i.placeholder || ''} ${i.getAttribute('aria-label') || ''} ${i.autocomplete || ''}`.toLowerCase();
+      return /(confirm|repeat|retype|verify|password_confirmation|pass2)/.test(attr);
+    });
+    
+    return hasConfirmSignal;
   }
 
   tryCaptureFilledCredentials(clickedInput) {
