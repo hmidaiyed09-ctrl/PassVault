@@ -226,26 +226,31 @@ class InterfaceInjector {
   }
 
   scan() {
-    // Aggressive scan for all potential credential inputs
+    // Only inject on auth pages (login, signup, register, auth)
+    if (!isAuthPageUrl(window.location.href)) return;
+
     const inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"])');
     inputs.forEach(input => {
-      if (input.dataset.passvault) return; // Already processed
+      if (input.dataset.passvault) return;
       if (this.isLikelyCredentialField(input)) this.processInput(input);
     });
   }
 
   isLikelyCredentialField(input) {
     if (input.offsetWidth < 10 || input.offsetHeight < 10) return false;
+    
+    const type = (input.type || '').toLowerCase();
+    // Only target password fields and username/email-like fields
+    if (type === 'password') return true;
+    if (type === 'email') return true;
+    
     const attrStr = ((input.id || '') + ' ' + (input.name || '') + ' ' + (input.placeholder || '') + ' ' + (input.getAttribute('aria-label') || '') + ' ' + (input.autocomplete || '')).toLowerCase();
-
+    
     if (attrStr.includes('search') || attrStr.includes('query')) return false;
-
-    const signals = ['user', 'login', 'email', 'mail', 'password', 'pass', 'pwd', 'account', 'username', 'name', 'phone', 'first', 'last', 'join', 'register'];
-    if (signals.some(s => attrStr.includes(s))) return true;
-
-    const form = input.closest('form');
-    if (form && form.querySelector('input[type="password"]')) return true;
-    return false;
+    
+    // Strict signals for username/email fields only
+    const usernameSignals = ['user', 'login', 'email', 'mail', 'username', 'account', 'handle'];
+    return usernameSignals.some(s => attrStr.includes(s));
   }
 
   processInput(input) {
