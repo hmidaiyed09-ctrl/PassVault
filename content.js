@@ -203,17 +203,7 @@ class InterfaceInjector {
 
   init() {
     this.flushPendingSignupOnLoad();
-    this.scan();
-    this.observer = new MutationObserver((mutations) => {
-      let shouldScan = false;
-      for (const m of mutations) {
-        if (m.addedNodes.length > 0 || m.type === 'attributes') { shouldScan = true; break; }
-      }
-      if (shouldScan) this.scan();
-    });
-    this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'hidden'] });
-    setTimeout(() => this.scan(), 1000);
-    setTimeout(() => this.scan(), 3000);
+    this.setupOnDemandInjection();
     window.addEventListener('hashchange', () => this.flushPendingSignupOnLoad());
     window.addEventListener('popstate', () => this.flushPendingSignupOnLoad());
   }
@@ -225,32 +215,48 @@ class InterfaceInjector {
     }, () => { });
   }
 
-  scan() {
-    // Only inject on auth pages (login, signup, register, auth)
-    if (!isAuthPageUrl(window.location.href)) return;
+  setupOnDemandInjection() {
+    // Listen for focus/click on any input - inject icon on-demand for credential fields
+    document.addEventListener('focusin', (e) => {
+      const input = e.target;
+      if (!this.isCredentialField(input)) return;
+      if (input.dataset.passvault) return; // Already has icon
+      this.processInput(input);
+    }, true);
 
-    const inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"])');
-    inputs.forEach(input => {
+    // Also handle click for fields that might not get focusin
+    document.addEventListener('click', (e) => {
+      const input = e.target;
+      if (!this.isCredentialField(input)) return;
       if (input.dataset.passvault) return;
-      if (this.isLikelyCredentialField(input)) this.processInput(input);
-    });
+      this.processInput(input);
+    }, true);
   }
 
-  isLikelyCredentialField(input) {
+  isCredentialField(input) {
+    if (!(input instanceof HTMLInputElement) && !(input instanceof HTMLTextAreaElement)) return false;
+    if (input.type === 'hidden' || input.type === 'submit' || input.type === 'button') return false;
     if (input.offsetWidth < 10 || input.offsetHeight < 10) return false;
-    
+
     const type = (input.type || '').toLowerCase();
-    // Only target password fields and username/email-like fields
+    // Always show on password fields
     if (type === 'password') return true;
     if (type === 'email') return true;
-    
+
     const attrStr = ((input.id || '') + ' ' + (input.name || '') + ' ' + (input.placeholder || '') + ' ' + (input.getAttribute('aria-label') || '') + ' ' + (input.autocomplete || '')).toLowerCase();
     
+    // Exclude search fields
     if (attrStr.includes('search') || attrStr.includes('query')) return false;
-    
-    // Strict signals for username/email fields only
-    const usernameSignals = ['user', 'login', 'email', 'mail', 'username', 'account', 'handle'];
-    return usernameSignals.some(s => attrStr.includes(s));
+
+    // Show on username/email-like fields
+    const usernameSignals = ['user', 'login', 'email', 'mail', 'username', 'account', 'handle', 'name'];
+    if (usernameSignals.some(s => attrStr.includes(s))) return true;
+
+    // Also show on fields in forms that have password fields (likely login/signup forms)
+    const form = input.closest('form');
+    if (form && form.querySelector('input[type="password"]')) return true;
+
+    return false;
   }
 
   processInput(input) {
