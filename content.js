@@ -809,7 +809,8 @@ class InterfaceInjector {
       padding: '16px',
       boxShadow: '0 14px 38px rgba(0, 0, 0, 0.45)',
       color: '#e0e0e0',
-      fontFamily: 'Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif'
+      fontFamily: 'Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif',
+      pointerEvents: 'auto'
     });
 
     Object.assign(title.style, { margin: '0 0 12px', fontSize: '16px', color: '#e94560' });
@@ -833,7 +834,8 @@ class InterfaceInjector {
       background: '#1a1a2e',
       color: '#e0e0e0',
       padding: '0 16px',
-      cursor: 'pointer'
+      cursor: 'pointer',
+      pointerEvents: 'auto'
     });
 
     yesBtn.type = 'button';
@@ -846,14 +848,24 @@ class InterfaceInjector {
       color: 'white',
       padding: '0 16px',
       cursor: 'pointer',
-      fontWeight: '600'
+      fontWeight: '600',
+      pointerEvents: 'auto'
     });
 
-    overlay.addEventListener('click', (evt) => {
+    const handleOverlayClick = (evt) => {
       if (evt.target === overlay) close(false);
-    });
-    noBtn.addEventListener('click', () => close(false));
-    yesBtn.addEventListener('click', () => close(true));
+    };
+    const handleNoClick = (evt) => { evt.stopPropagation(); close(false); };
+    const handleYesClick = (evt) => { evt.stopPropagation(); close(true); };
+    const handleKeydown = (evt) => {
+      if (evt.key === 'Enter') { evt.stopPropagation(); close(true); }
+      if (evt.key === 'Escape') { evt.stopPropagation(); close(false); }
+    };
+
+    overlay.addEventListener('click', handleOverlayClick);
+    noBtn.addEventListener('click', handleNoClick);
+    yesBtn.addEventListener('click', handleYesClick);
+    overlay.addEventListener('keydown', handleKeydown);
 
     actions.appendChild(noBtn);
     actions.appendChild(yesBtn);
@@ -862,7 +874,10 @@ class InterfaceInjector {
     card.appendChild(actions);
     overlay.appendChild(card);
     document.body.appendChild(overlay);
+    
+    // Focus and trap focus
     yesBtn.focus();
+    overlay.setAttribute('tabindex', '-1');
   }
 
   escapeHtml(text) {
