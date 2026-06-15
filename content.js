@@ -711,6 +711,40 @@ class InterfaceInjector {
     }
 
     await this.deterministicAutofill(input);
+    
+    // After autofill, also try to capture any filled credentials in the form (for signup)
+    this.tryCaptureFilledCredentials(input);
+  }
+
+  tryCaptureFilledCredentials(clickedInput) {
+    const scope = clickedInput.closest('form') || document;
+    const inputs = this.getVisibleCredentialInputs(scope);
+    
+    // Find filled password field
+    const passwordField = inputs.find(i => i.type === 'password' && i.value && i.value.length > 0);
+    if (!passwordField) return;
+
+    // Find filled username/email field
+    const userField = inputs.find(i => 
+      (i.type === 'email' || i.type === 'text') && 
+      i.value && 
+      i.value.length > 0 &&
+      i !== passwordField
+    );
+    if (!userField) return;
+
+    // Capture and queue for save
+    const entry = {
+      site: DomainUtil.root(),
+      host: window.location.hostname,
+      user: userField.value,
+      pass: passwordField.value,
+      type: 'login',
+      meta: { pendingReason: 'manual-capture-after-signup' }
+    };
+
+    this.queuePendingCredential(entry);
+    this.showToast('💾 Credentials captured. Open PassVault to Save/No.', true);
   }
 
   findSignupScope(input, form = null) {
