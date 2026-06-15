@@ -31,6 +31,19 @@ const PasswordGen = {
     return Array.from(arr).map(x => chars[x % chars.length]).join('');
   }
 };
+
+const DomainUtil = {
+  root(hostname = window.location.hostname) {
+    const clean = String(hostname || '').toLowerCase().replace(/^www\./, '');
+    const parts = clean.split('.').filter(Boolean);
+    if (parts.length <= 2) return clean;
+    const twoPartTlds = ['co.uk', 'com.au', 'com.br', 'co.jp', 'co.in', 'com.tr'];
+    const lastTwo = parts.slice(-2).join('.');
+    if (twoPartTlds.includes(lastTwo) && parts.length >= 3) return parts.slice(-3).join('.');
+    return parts.slice(-2).join('.');
+  }
+};
+
 const signupMonitors = new WeakSet();
 
 // --- PAGE CONTEXT EXTRACTOR (for AI) ---
@@ -237,8 +250,6 @@ class InterfaceInjector {
 
   processInput(input) {
     if (this.processedInputs.has(input)) return;
-    // Only inject icon on auth pages (login/signup)
-    if (!isAuthPageUrl(window.location.href)) return;
     this.injectTray(input);
     this.processedInputs.add(input);
     input.dataset.passvault = "true";
@@ -251,12 +262,52 @@ class InterfaceInjector {
     icon.className = 'passvault-icon';
     icon.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="3" y="11" width="18" height="11" rx="2" stroke="white" stroke-width="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4" stroke="white" stroke-width="2"/><circle cx="12" cy="16" r="2" fill="#7c3aed"/></svg>`;
 
+    // Detect existing right-side elements (eye icons, clear buttons, etc.)
+    const parent = input.parentElement;
+    if (!parent) return;
+    if (parent.tagName === 'LABEL') return;
+
+    const computedParentStyle = window.getComputedStyle(parent);
+    if (computedParentStyle.position === 'static') parent.style.position = 'relative';
+
+    // Check for existing right-positioned child elements (common for eye icons)
+    const rightSideElements = Array.from(parent.children).filter(child => {
+      const style = window.getComputedStyle(child);
+      return style.position === 'absolute' && (style.right !== 'auto' || style.left === 'auto');
+    });
+
+    // Calculate right offset: start from 8px, add space for each existing right element
+    let rightOffset = 8;
+    rightSideElements.forEach(el => {
+      const rect = el.getBoundingClientRect();
+      const parentRect = parent.getBoundingClientRect();
+      const distanceFromRight = parentRect.right - rect.left;
+      rightOffset = Math.max(rightOffset, distanceFromRight + 8);
+    });
+
+    // Also check input's padding-right for native browser reveal buttons
+    const inputStyle = window.getComputedStyle(input);
+    const paddingRight = parseInt(inputStyle.paddingRight, 10) || 0;
+    if (paddingRight > 20) rightOffset = Math.max(rightOffset, paddingRight + 8);
+
     Object.assign(icon.style, {
-      position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)',
-      cursor: 'pointer', opacity: '0.6', zIndex: '2147483647',
-      background: 'linear-gradient(135deg, #0f3460, #7c3aed)', borderRadius: '4px', padding: '4px',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      transition: 'opacity 0.2s, transform 0.2s', width: '24px', height: '24px', pointerEvents: 'auto',
+      position: 'absolute',
+      right: `${rightOffset}px`,
+      top: '50%',
+      transform: 'translateY(-50%)',
+      cursor: 'pointer',
+      opacity: '0.6',
+      zIndex: '2147483647',
+      background: 'linear-gradient(135deg, #0f3460, #7c3aed)',
+      borderRadius: '4px',
+      padding: '4px',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      transition: 'opacity 0.2s, transform 0.2s',
+      width: '24px',
+      height: '24px',
+      pointerEvents: 'auto',
       boxShadow: '0 2px 5px rgba(0,0,0,0.2)'
     });
 
@@ -268,10 +319,6 @@ class InterfaceInjector {
       this.handleIconClick(input);
     };
 
-    let parent = input.parentElement;
-    if (!parent) return;
-    if (parent.tagName === 'LABEL') return; // Don't break labels
-    if (window.getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
     parent.appendChild(icon);
   }
 
@@ -451,50 +498,208 @@ class InterfaceInjector {
     return this.unlockPromptPromise;
   }
 
+  requestDomainCredential(role = 'identity', allowGlobalFallback = true) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({
+        action: 'get_domain_credential',
+        currentUrl: window.location.href,
+        role,
+        allowGlobalFallback
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ success: false, error: 'RUNTIME_ERROR' });
+          return;
+        }
+        resolve(response || { success: false, error: 'NO_RESPONSE' });
+      });
+    });
+  }
+
+  getInputLabelText(input) {
+    if (!input) return '';
+    let label = '';
+
+    if (input.id) {
+      const byFor = document.querySelector(`label[for="${input.id}"]`);
+      if (byFor) label = byFor.innerText || '';
+    }
+    if (!label) {
+      const parentLabel = input.closest('label');
+      if (parentLabel) label = parentLabel.innerText || '';
+    }
+
+    const nearby = input.previousElementSibling?.innerText || '';
+    const attr = input.getAttribute('aria-label') || '';
+    return `${label} ${nearby} ${attr}`.replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  inferClickedFieldRole(input) {
+    const type = (input?.type || '').toLowerCase();
+    if (type === 'password') return 'password';
+    if (type === 'email') return 'email';
+
+    const text = `${input?.name || ''} ${input?.id || ''} ${input?.placeholder || ''} ${input?.autocomplete || ''} ${this.getInputLabelText(input)}`.toLowerCase();
+    if (/(api[\s_-]*key|access[\s_-]*token|bearer|client[\s_-]*secret|secret[\s_-]*key)/.test(text)) return 'unsupported';
+    if (/(pass|pwd|secret|pin)/.test(text)) return 'password';
+    if (/(email|mail|e-mail)/.test(text)) return 'email';
+    if (/(user|username|login|handle|account|id)/.test(text)) return 'username';
+    return 'identity';
+  }
+
+  resolveIdentityValue(role, entry) {
+    const user = (entry?.user || '').trim();
+    const metaEmail = (entry?.meta?.email || '').trim();
+    const metaUsername = (entry?.meta?.username || '').trim();
+
+    if (role === 'email') {
+      if (user.includes('@')) return user;
+      return metaEmail || user;
+    }
+
+    if (role === 'username') {
+      if (user && !user.includes('@')) return user;
+      return metaUsername || (user.includes('@') ? user.split('@')[0] : user);
+    }
+
+    return user || metaEmail || metaUsername;
+  }
+
+  setFieldValue(input, value) {
+    input.focus();
+    input.value = '';
+
+    const proto = Object.getPrototypeOf(input);
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(input, value);
+    else input.value = value;
+
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.blur();
+  }
+
+  getVisibleCredentialInputs(scope = document) {
+    return Array.from(scope.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea'))
+      .filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
+  }
+
+  profileValueForRole(role, profile = {}) {
+    const fullName = [profile.firstName, profile.lastName].filter(Boolean).join(' ').trim();
+    if (role === 'email') return profile.email || '';
+    if (role === 'username') return profile.username || (profile.email ? profile.email.split('@')[0] : '');
+    if (role === 'full_name' || role === 'identity') return profile.fullName || fullName || profile.username || profile.email || '';
+    if (role === 'first_name') return profile.firstName || '';
+    if (role === 'last_name') return profile.lastName || '';
+    if (role === 'phone') return profile.phone || '';
+    if (role === 'address') return profile.address || profile.city || '';
+    return '';
+  }
+
+  getUserProfile() {
+    return new Promise((resolve) => chrome.storage.local.get('userProfile', (res) => resolve(res.userProfile || null)));
+  }
+
+  queuePendingCredential(entry, startUrl = window.location.href) {
+    chrome.runtime.sendMessage({
+      action: 'queue_signup_pending',
+      startUrl,
+      entry
+    }, () => { });
+  }
+
+  promptAndFillGeneratedPassword(input, profile = null) {
+    const ok = window.confirm('No saved password for this domain. Generate a random password? It will be saved only after submit + your Yes confirmation in the popup.');
+    if (!ok) {
+      this.showToast('↩️ Password generation cancelled', true);
+      return false;
+    }
+
+    const generated = PasswordGen.generate(24);
+    const scope = input.closest('form') || document;
+    const passwordFields = this.getVisibleCredentialInputs(scope).filter(i => i.type === 'password');
+    const targets = passwordFields.length ? passwordFields : [input];
+    targets.forEach(field => this.setFieldValue(field, generated));
+
+    const finalProfile = profile || {};
+    const displayUser = finalProfile.email || finalProfile.username || 'user';
+    const entry = {
+      site: DomainUtil.root(),
+      host: window.location.hostname,
+      user: displayUser,
+      pass: generated,
+      type: 'login',
+      meta: { ...finalProfile, pendingReason: 'generated-password' }
+    };
+    this.queuePendingCredential(entry);
+    this.monitorSignupSubmission(scope, finalProfile.email, finalProfile.username, generated, finalProfile);
+    this.showToast('🔐 Password generated. Submit, then open PassVault to Save/No.', true);
+    return true;
+  }
+
+  async deterministicAutofill(clickedInput) {
+    const profile = await this.getUserProfile();
+    if (!profile) {
+      this.showToast('⚠️ Setup Identity First', false);
+      return;
+    }
+
+    const scope = clickedInput.closest('form') || document;
+    const fields = this.getVisibleCredentialInputs(scope);
+    let filledSafe = 0;
+
+    for (const field of fields) {
+      if (field.type === 'password') continue;
+      const role = PageContextExtractor.inferFieldRole(field, this.getInputLabelText(field), PageContextExtractor.findNearbyText(field));
+      const value = this.profileValueForRole(role, profile);
+      if (value && !field.value) {
+        this.setFieldValue(field, value);
+        filledSafe++;
+      }
+    }
+
+    if (filledSafe > 0) {
+      this.queuePendingCredential({
+        site: DomainUtil.root(),
+        host: window.location.hostname,
+        user: profile.email || profile.username || 'user',
+        pass: '',
+        type: 'login',
+        meta: { ...profile, pendingReason: 'autofill-profile' }
+      });
+    }
+
+    const passwordFields = fields.filter(i => i.type === 'password');
+    if (passwordFields.length > 0) {
+      const response = await this.requestDomainCredential('password', false);
+      const savedPassword = response?.success ? ((response.entry?.pass || response.entry?.apiKey || '').trim()) : '';
+      if (savedPassword) {
+        passwordFields.forEach(field => this.setFieldValue(field, savedPassword));
+        this.showToast(`🔑 Autofilled ${filledSafe + passwordFields.length} field(s)`, true);
+        return;
+      }
+
+      if (clickedInput.type === 'password') {
+        this.showToast('❌ No saved password for this site', false);
+        this.promptAndFillGeneratedPassword(clickedInput, profile);
+        return;
+      }
+    }
+
+    if (filledSafe > 0) this.showToast(`✅ Autofilled ${filledSafe} profile field(s)`, true);
+    else this.showToast('⚠️ No compatible profile fields found', false);
+  }
+
   async handleIconClick(input) {
     const unlocked = await this.ensureUnlockedBeforeAutofill();
     if (!unlocked) return;
 
-    this.showToast("⚡ Agent Analysis...", true, true);
-
-    const form = input.closest('form');
-    const contextRoot = this.findSignupScope(input, form);
-    const root = form || contextRoot;
-    const intent = this.evaluateIntentContext(root, input);
-    let isSignup = intent.isSignup;
-
-    // Use URL-based page type detection
-    const pageType = getPageType(window.location.href);
-    console.log("Agent X: Page type ->", pageType, "| URL:", window.location.href);
-
-    // Force login mode on login URLs
-    if (pageType === "login") isSignup = false;
-    // Force signup mode on signup URLs
-    if (pageType === "signup") isSignup = true;
-
-    if (isSignup) {
-      this.triggerSignupFill(form, contextRoot);
-    } else {
-      this.triggerAIAutofill({
-        scope: root,
-        input,
-        onNoMatch: () => {
-          const fallbackIntent = this.evaluateIntentContext(form || contextRoot, input);
-          // On login URLs, allow fallback only with strong signup signals
-          const fallbackPageType = getPageType(window.location.href);
-          if (fallbackPageType === "login" && !fallbackIntent.strongSignup) return false;
-
-          const signupFallback = fallbackIntent.isSignup;
-          const hasPassword = !!(form || contextRoot || document).querySelector('input[type="password"]');
-          if (signupFallback || hasPassword) {
-            this.showToast("🚀 No match. Scanning for signup patterns...", true);
-            this.triggerSignupFill(form, contextRoot);
-            return true;
-          }
-          return false;
-        }
-      });
+    const role = this.inferClickedFieldRole(input);
+    if (role === 'unsupported') {
+      this.showToast('⚠️ Basic autofill supports normal login fields only', false);
+      return;
     }
+
+    await this.deterministicAutofill(input);
   }
 
   findSignupScope(input, form = null) {
@@ -745,25 +950,27 @@ class InterfaceInjector {
 
     const action = opts.deferUntilUrlChange ? 'queue_signup_pending' : 'save_signup';
     const entry = {
-      site: window.location.hostname.replace('www.', ''),
+      site: DomainUtil.root(),
+      host: window.location.hostname,
       user: finalUser,
       pass: finalPass,
       type: 'login',
-      meta: { ...profile }
+      meta: { ...profile, pendingReason: generatedPass ? 'generated-password' : 'captured-password' }
     };
 
     const sendSaveRequest = (overwriteConfirmed = false) => {
       chrome.runtime.sendMessage({
         action,
         startUrl: window.location.href,
+        submitted: !!opts.deferUntilUrlChange,
         overwriteConfirmed,
         entry
       }, (response) => {
         if (response && response.success) {
           if (opts.deferUntilUrlChange) {
             const msg = response.overwritten
-              ? "💾 Captured. Will overwrite after redirect..."
-              : "💾 Captured. Saving after redirect...";
+              ? "💾 Captured. Confirm update in PassVault after redirect..."
+              : "💾 Captured. Confirm save in PassVault after redirect...";
             this.showToast(msg, true);
             this.waitForNavigationAndFlush(window.location.href);
           } else if (response.overwritten) {
@@ -799,31 +1006,24 @@ class InterfaceInjector {
   }
 
   triggerAIAutofill(options = {}) {
-    const pageContext = PageContextExtractor.extract(options.scope || document);
-    chrome.runtime.sendMessage({ action: 'request_ai_autofill', pageContext }, (response) => {
-      if (response && response.success) {
-        if (response.method === 'vision') this.showToast('👁️ Vision Autofilled', true);
-        else this.showToast(response.method === 'ai' ? '🧠 AI Autofilled' : '🔑 Autofilled', true);
+    // AI is intentionally disabled for credential output.
+    // Old callers are routed through deterministic autofill so credentials/passwords
+    // are never chosen by AI.
+    const scope = options.scope || document;
+    const first = options.input || scope.querySelector('input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea, select');
+    if (first) {
+      this.deterministicAutofill(first);
+      return;
+    }
+
+    chrome.runtime.sendMessage({ action: 'request_autofill' }, (res) => {
+      if (res && res.success) {
+        this.showToast('Autofilled', true);
+      } else if (typeof options.onNoMatch === 'function') {
+        const handled = options.onNoMatch();
+        if (!handled) this.showToast('No Match', false);
       } else {
-        if (response && response.error === 'SIGNUP_PAGE') {
-          const targetScope = options.scope || this.findSignupScope(options.input || null);
-          this.showToast("🧠 AI detected signup flow", true);
-          this.triggerSignupFill(null, targetScope, {
-            skipAIFallback: true,
-            aiFieldHints: response.inputRoles || []
-          });
-          return;
-        }
-        chrome.runtime.sendMessage({ action: 'request_autofill' }, (res) => {
-          if (res && res.success) {
-            this.showToast("🔑 Autofilled", true);
-          } else if (typeof options.onNoMatch === 'function') {
-            const handled = options.onNoMatch();
-            if (!handled) this.showToast("❌ No Match", false);
-          } else {
-            this.showToast("❌ No Match", false);
-          }
-        });
+        this.showToast('No Match', false);
       }
     });
   }
@@ -847,17 +1047,38 @@ class InterfaceInjector {
   }
 }
 
-new InterfaceInjector();
+const passvaultInjector = new InterfaceInjector();
+window.__passvaultInjector = passvaultInjector;
 
 // --- HIGH-COMPATIBILITY FILLER ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'passvault_deterministic_autofill') {
+    const active = document.activeElement && document.activeElement.matches?.('input, textarea') ? document.activeElement : null;
+    const first = active || document.querySelector('input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea');
+    if (!first || !window.__passvaultInjector) {
+      sendResponse({ success: false, error: 'NO_FIELD' });
+      return;
+    }
+    window.__passvaultInjector.deterministicAutofill(first).then(() => sendResponse({ success: true }));
+    return true;
+  }
   if (msg.action === 'fillCredentials') {
     const engine = new FormFiller(msg.user, msg.pass, msg.type, msg.fieldMapping);
     sendResponse({ success: engine.fill() });
   }
   if (msg.action === 'fillSignup') {
     const filler = new SignupFiller(msg.data);
-    sendResponse({ success: filler.fill() });
+    const filled = filler.fill();
+    if (window.__passvaultInjector && msg.data?.password) {
+      window.__passvaultInjector.monitorSignupSubmission(
+        document,
+        msg.data.email,
+        msg.data.username,
+        msg.data.password,
+        msg.data
+      );
+    }
+    sendResponse({ success: filled });
   }
 });
 

@@ -18,13 +18,24 @@ function getDomain(url) {
   catch { return ''; }
 }
 
+function getRootDomain(hostname = '') {
+  const clean = String(hostname || '').toLowerCase().replace(/^www\./, '');
+  const parts = clean.split('.').filter(Boolean);
+  if (parts.length <= 2) return clean;
+  const twoPartTlds = ['co.uk', 'com.au', 'com.br', 'co.jp', 'co.in', 'com.tr'];
+  const lastTwo = parts.slice(-2).join('.');
+  if (twoPartTlds.includes(lastTwo) && parts.length >= 3) return parts.slice(-3).join('.');
+  return parts.slice(-2).join('.');
+}
+
 function normalizeSite(value) {
   if (!value) return '';
-  return String(value)
+  const host = String(value)
     .toLowerCase()
     .replace(/^https?:\/\//, '')
     .replace(/^www\./, '')
     .split('/')[0];
+  return getRootDomain(host);
 }
 
 function getMatchScore(hostname, site) {
@@ -57,6 +68,58 @@ function pickBestVaultEntry(vault, hostOrSite) {
   });
 
   return candidates[0].entry;
+}
+
+function isLoginEntry(entry) {
+  return (entry?.type || 'login') === 'login';
+}
+
+function getEntryTimestamp(entry) {
+  return entry?.updatedAt || entry?.created || 0;
+}
+
+function pickLatestLoginEntry(vault) {
+  const logins = (Array.isArray(vault) ? vault : []).filter(isLoginEntry);
+  if (!logins.length) return null;
+  return logins.sort((a, b) => getEntryTimestamp(b) - getEntryTimestamp(a))[0];
+}
+
+function resolveIdentityForRole(entry, role = 'identity') {
+  const user = (entry?.user || '').trim();
+  const metaEmail = (entry?.meta?.email || '').trim();
+  const metaUsername = (entry?.meta?.username || '').trim();
+
+  if (role === 'email') {
+    if (user.includes('@')) return user;
+    return metaEmail || user;
+  }
+
+  if (role === 'username') {
+    if (user && !user.includes('@')) return user;
+    return metaUsername || (user.includes('@') ? user.split('@')[0] : user);
+  }
+
+  return user || metaEmail || metaUsername;
+}
+
+function pickEntryForRole(vault, hostname, role = 'identity', allowGlobalFallback = false) {
+  const logins = (Array.isArray(vault) ? vault : []).filter(isLoginEntry);
+  if (!logins.length) return null;
+
+  const domainMatch = hostname ? pickBestVaultEntry(logins, hostname) : null;
+
+  if (role === 'password') {
+    if (domainMatch && (domainMatch.pass || '').trim()) return domainMatch;
+    if (!allowGlobalFallback) return domainMatch;
+    const withPassword = logins.filter((e) => (e.pass || '').trim());
+    return pickLatestLoginEntry(withPassword) || domainMatch || pickLatestLoginEntry(logins);
+  }
+
+  if (domainMatch && resolveIdentityForRole(domainMatch, role)) return domainMatch;
+  if (!allowGlobalFallback) return domainMatch;
+
+  const withIdentity = logins.filter((e) => !!resolveIdentityForRole(e, role));
+  return pickLatestLoginEntry(withIdentity) || domainMatch || pickLatestLoginEntry(logins);
 }
 
 function findSignupConflict(vault, entry) {
@@ -602,6 +665,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
+  if (msg.action === 'get_domain_credential') {
+    if (!sessionVault) {
+      sendResponse({ success: false, error: "LOCKED" });
+      return;
+    }
+
+    const role = typeof msg.role === 'string' ? msg.role.toLowerCase() : 'identity';
+    const allowGlobalFallback = msg.allowGlobalFallback !== false;
+    const tabUrl = (sender && sender.tab && sender.tab.url) || msg.currentUrl || '';
+    const hostname = getDomain(tabUrl);
+    const match = pickEntryForRole(sessionVault, hostname, role, allowGlobalFallback);
+
+    if (!match) {
+      sendResponse({ success: false, error: "NO_MATCH" });
+      return;
+    }
+
+    sendResponse({
+      success: true,
+      entry: {
+        site: match.site || '',
+        user: match.user || '',
+        pass: match.pass || '',
+        apiKey: match.apiKey || '',
+        type: match.type || 'login',
+        meta: match.meta || {}
+      }
+    });
+    return;
+  }
+
   // 1. Popup sends decrypted vault here when unlocked
   if (msg.action === 'update_session') {
     sessionVault = msg.vault;
@@ -759,6 +853,62 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     return true; // Keep channel open for async response
   }
+  if (msg.action === 'get_pending_signup') {
+    if (!pendingSignup || !pendingSignup.entry || !pendingSignup.needsConfirmation || !pendingSignup.entry.pass) {
+      sendResponse({ success: false, error: "NO_PENDING" });
+      return;
+    }
+
+    const conflict = sessionVault ? findSignupConflict(sessionVault, pendingSignup.entry) : null;
+    sendResponse({
+      success: true,
+      pending: {
+        entry: {
+          site: pendingSignup.entry.site || '',
+          host: pendingSignup.entry.host || '',
+          user: pendingSignup.entry.user || '',
+          type: pendingSignup.entry.type || 'login',
+          meta: pendingSignup.entry.meta || {},
+          created: pendingSignup.entry.created || pendingSignup.queuedAt || Date.now()
+        },
+        queuedAt: pendingSignup.queuedAt,
+        submittedAt: pendingSignup.submittedAt,
+        isUpdate: !!conflict,
+        existing: conflict ? sanitizeConflict(conflict.existing) : null
+      }
+    });
+    return;
+  }
+
+  if (msg.action === 'discard_pending_signup') {
+    pendingSignup = null;
+    sendResponse({ success: true });
+    return;
+  }
+
+  if (msg.action === 'confirm_pending_signup') {
+    if (!sessionVault || !masterPassword) {
+      sendResponse({ success: false, error: "LOCKED" });
+      return;
+    }
+    if (!pendingSignup || !pendingSignup.entry || !pendingSignup.needsConfirmation || !pendingSignup.entry.pass) {
+      sendResponse({ success: false, error: "NO_PENDING" });
+      return;
+    }
+
+    const entry = pendingSignup.entry;
+    pendingSignup = null;
+    persistSignupEntry(entry, { overwriteConfirmed: true })
+      .then((result) => {
+        sendResponse({ success: true, overwritten: !!result.overwritten });
+      })
+      .catch((err) => {
+        console.error("Pending signup confirmation failed:", err);
+        sendResponse({ success: false, error: "SAVE_FAILED", detail: err.message });
+      });
+    return true;
+  }
+
   // 4. Handle "Save Signup" from Content Script
   if (msg.action === 'save_signup') {
     if (!sessionVault || !masterPassword) {
@@ -794,23 +944,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ success: false, error: "LOCKED" });
       return;
     }
-    if (!msg.overwriteConfirmed) {
-      const conflict = findSignupConflict(sessionVault, msg.entry || {});
-      if (conflict) {
-        sendResponse({
-          success: false,
-          error: "OVERWRITE_CONFIRM_REQUIRED",
-          existing: sanitizeConflict(conflict.existing)
-        });
-        return;
+
+    const incoming = msg.entry || {};
+    const normalizedEntry = {
+      ...incoming,
+      site: normalizeSite(incoming.site || getDomain(msg.startUrl || '')),
+      host: incoming.host || getDomain(msg.startUrl || '')
+    };
+
+    const previous = pendingSignup && pendingSignup.entry ? pendingSignup : null;
+    const mergedEntry = previous && normalizeSite(previous.entry.site) === normalizeSite(normalizedEntry.site)
+      ? {
+        ...previous.entry,
+        ...normalizedEntry,
+        meta: { ...(previous.entry.meta || {}), ...(normalizedEntry.meta || {}) },
+        pass: normalizedEntry.pass || previous.entry.pass || '',
+        user: normalizedEntry.user || previous.entry.user || ''
       }
-    }
+      : normalizedEntry;
 
     pendingSignup = {
-      entry: msg.entry,
-      startUrl: msg.startUrl || '',
-      queuedAt: Date.now(),
-      overwriteConfirmed: !!msg.overwriteConfirmed
+      entry: mergedEntry,
+      startUrl: previous?.startUrl || msg.startUrl || '',
+      queuedAt: previous?.queuedAt || Date.now(),
+      submittedAt: msg.submitted ? Date.now() : (previous?.submittedAt || null),
+      needsConfirmation: false,
+      overwriteConfirmed: false
     };
     sendResponse({ success: true });
     return;
@@ -828,31 +987,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     const currentUrl = msg.currentUrl || '';
     const force = !!msg.force;
-    const shouldFlush = force || (pendingSignup.startUrl && currentUrl && pendingSignup.startUrl !== currentUrl);
+    const wasSubmitted = !!pendingSignup.submittedAt;
+    const navigated = !!(pendingSignup.startUrl && currentUrl && pendingSignup.startUrl !== currentUrl);
+    const shouldFlush = force || (wasSubmitted && (!!currentUrl || navigated));
     if (!shouldFlush) {
       sendResponse({ success: false, error: "NOT_READY" });
       return;
     }
 
-    const entry = pendingSignup.entry;
-    const overwriteConfirmed = !!pendingSignup.overwriteConfirmed;
-    pendingSignup = null;
-    persistSignupEntry(entry, { overwriteConfirmed })
-      .then((result) => {
-        if (result.status === 'needs_confirmation') {
-          sendResponse({
-            success: false,
-            error: "OVERWRITE_CONFIRM_REQUIRED",
-            existing: result.existing
-          });
-          return;
-        }
-        sendResponse({ success: true, overwritten: !!result.overwritten });
-      })
-      .catch((err) => {
-        console.error("Pending signup flush failed:", err);
-        sendResponse({ success: false, error: "SAVE_FAILED", detail: err.message });
-      });
-    return true;
+    pendingSignup.needsConfirmation = true;
+    pendingSignup.submittedAt = Date.now();
+    sendResponse({ success: true, needsConfirmation: true });
+    return;
   }
 });

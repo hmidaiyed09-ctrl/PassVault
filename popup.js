@@ -274,6 +274,8 @@ const App = {
 
     // Autofill
     document.getElementById('autofillBtn').addEventListener('click', () => this.handleAutofill());
+    document.getElementById('confirmPendingSaveBtn').addEventListener('click', () => this.confirmPendingSave());
+    document.getElementById('discardPendingSaveBtn').addEventListener('click', () => this.discardPendingSave());
 
     // Cloud Sync
     document.getElementById('cloudSyncBtn').addEventListener('click', () => this.handleCloudSync());
@@ -323,13 +325,24 @@ const App = {
     document.getElementById('note-fields').style.display = type === 'note' ? 'flex' : 'none';
   },
 
+  getRootDomain(hostname = '') {
+    const clean = String(hostname || '').toLowerCase().replace(/^www\./, '');
+    const parts = clean.split('.').filter(Boolean);
+    if (parts.length <= 2) return clean;
+    const twoPartTlds = ['co.uk', 'com.au', 'com.br', 'co.jp', 'co.in', 'com.tr'];
+    const lastTwo = parts.slice(-2).join('.');
+    if (twoPartTlds.includes(lastTwo) && parts.length >= 3) return parts.slice(-3).join('.');
+    return parts.slice(-2).join('.');
+  },
+
   normalizeSite(value) {
     if (!value) return '';
-    return String(value)
+    const host = String(value)
       .toLowerCase()
       .replace(/^https?:\/\//, '')
       .replace(/^www\./, '')
       .split('/')[0];
+    return this.getRootDomain(host);
   },
 
   matchScore(hostname, site) {
@@ -492,6 +505,63 @@ const App = {
 
     this.showView('vault');
     this.renderVault();
+    this.checkPendingSavePrompt();
+  },
+
+  checkPendingSavePrompt() {
+    const card = document.getElementById('pending-save-card');
+    const title = document.getElementById('pending-save-title');
+    const details = document.getElementById('pending-save-details');
+    if (!card || !title || !details) return;
+
+    chrome.runtime.sendMessage({ action: 'get_pending_signup' }, (res) => {
+      if (!res || !res.success || !res.pending) {
+        card.style.display = 'none';
+        return;
+      }
+
+      const pending = res.pending;
+      const entry = pending.entry || {};
+      title.textContent = pending.isUpdate
+        ? `Update saved password for ${entry.site || 'this site'}?`
+        : `Save generated password for ${entry.site || 'this site'}?`;
+      details.innerHTML = `
+        <div><strong>Site:</strong> ${this.escapeHtml(entry.site || '')}</div>
+        <div><strong>User:</strong> ${this.escapeHtml(entry.user || '')}</div>
+        <div><strong>Password:</strong> ********</div>
+      `;
+      card.style.display = 'block';
+    });
+  },
+
+  async reloadVaultFromDisk() {
+    if (!this.masterPassword) return;
+    const result = await new Promise((resolve) => chrome.storage.local.get(['secureVault'], resolve));
+    if (!result.secureVault) return;
+    this.vault = await CryptoService.decrypt(result.secureVault, this.masterPassword);
+    chrome.runtime.sendMessage({
+      action: 'update_session',
+      vault: this.vault,
+      aiSettings: this.aiSettings
+    });
+  },
+
+  async confirmPendingSave() {
+    chrome.runtime.sendMessage({ action: 'confirm_pending_signup' }, async (res) => {
+      if (!res || !res.success) {
+        alert(res?.error === 'LOCKED' ? 'Unlock PassVault first.' : 'Could not save pending password.');
+        return;
+      }
+      await this.reloadVaultFromDisk();
+      document.getElementById('pending-save-card').style.display = 'none';
+      this.renderVault();
+    });
+  },
+
+  discardPendingSave() {
+    chrome.runtime.sendMessage({ action: 'discard_pending_signup' }, () => {
+      document.getElementById('pending-save-card').style.display = 'none';
+    });
   },
 
   lockVault() {
@@ -686,6 +756,8 @@ const App = {
   // --- QUICK SIGNUP ---
   showSignupView() {
     document.getElementById('signupForm').reset();
+    // Generate only when the user opens/uses the explicit Quick Signup generator.
+    // It is queued as pending and is not saved until submit/navigation + Yes confirmation.
     document.getElementById('suPassword').value = PasswordGen.generate(20);
 
     // Pre-fill Identity from storage
@@ -738,10 +810,12 @@ const App = {
 
     // Get current site
     let siteName = '';
+    let activeTabUrl = '';
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tabs[0]) {
-        siteName = new URL(tabs[0].url).hostname.replace('www.', '');
+        activeTabUrl = tabs[0].url || '';
+        siteName = this.getRootDomain(new URL(activeTabUrl).hostname);
       }
     } catch { /* noop */ }
 
@@ -757,34 +831,25 @@ const App = {
       }
     });
 
-    // 3. AUTO-CREATE LOGIN IN VAULT
-    const displayUser = email || username || `${firstName} ${lastName}`.trim();
-    const duplicate = this.findLoginDuplicate({ site: siteName, user: displayUser });
-    if (duplicate) {
-      const existing = duplicate.entry;
-      const ok = window.confirm(`A credential already exists for ${existing.site} (${existing.user || 'unknown user'}). Overwrite it?`);
-      if (!ok) {
-        this.showView('vault');
-        this.renderVault();
-        return;
+    // 3. DO NOT SAVE IMMEDIATELY.
+    // Generated passwords become pending and are saved only after submit/navigation + Yes in home popup.
+    const displayUser = email || username || `${firstName} ${lastName}`.trim() || 'user';
+    chrome.runtime.sendMessage({
+      action: 'queue_signup_pending',
+      startUrl: activeTabUrl,
+      entry: {
+        site: this.normalizeSite(siteName),
+        host: siteName,
+        user: displayUser,
+        pass: password,
+        type: 'login',
+        meta: { ...userProfile, pendingReason: 'quick-signup-generated-password' }
       }
-    }
+    }, () => { });
 
-    this.upsertLoginEntry({
-      id: crypto.randomUUID(),
-      type: 'login',
-      site: siteName,
-      user: displayUser,
-      pass: password,
-      created: Date.now(),
-      meta: { ...userProfile } // Store all metadata
-    });
-
-    await this.saveVaultToDisk();
-
-    // Go to vault and show success
     this.showView('vault');
     this.renderVault();
+    alert('Filled the signup form. Submit the site, then open PassVault again to choose Yes or No.');
   },
 
   // --- CRUD ---
@@ -892,21 +957,13 @@ const App = {
   handleAutofill() {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
-      const tabUrl = tabs[0].url;
-      const urlHostname = new URL(tabUrl).hostname;
-      const match = this.pickBestVaultMatch(urlHostname);
-
-      if (match) {
-        chrome.tabs.sendMessage(tabs[0].id, {
-          action: 'fillCredentials',
-          user: match.user || '',
-          pass: match.pass || match.apiKey || '',
-          type: match.type || 'login'
-        });
+      chrome.tabs.sendMessage(tabs[0].id, { action: 'passvault_deterministic_autofill' }, (res) => {
+        if (chrome.runtime.lastError || !res || !res.success) {
+          alert('Could not autofill this page. Click a PassVault field icon on the page instead.');
+          return;
+        }
         window.close();
-      } else {
-        alert("No credentials found for this site.");
-      }
+      });
     });
   },
 
