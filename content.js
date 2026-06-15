@@ -684,12 +684,16 @@ class InterfaceInjector {
       const response = await this.requestDomainCredential('password', false);
       const savedPassword = response?.success ? ((response.entry?.pass || response.entry?.apiKey || '').trim()) : '';
       if (savedPassword) {
-        passwordFields.forEach(field => this.setFieldValue(field, savedPassword));
+        // Only fill empty password fields
+        passwordFields.forEach(field => {
+          if (!field.value) this.setFieldValue(field, savedPassword);
+        });
         this.showToast(`🔑 Autofilled ${filledSafe + passwordFields.length} field(s)`, true);
         return;
       }
 
-      if (clickedInput.type === 'password') {
+      // Only generate if clicked password field is empty
+      if (clickedInput.type === 'password' && !clickedInput.value) {
         this.showToast('❌ No saved password for this site', false);
         this.promptAndFillGeneratedPassword(clickedInput, profile);
         return;
