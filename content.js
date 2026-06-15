@@ -755,18 +755,120 @@ class InterfaceInjector {
     );
     if (!userField) return;
 
-    // Capture and queue for save
-    const entry = {
-      site: DomainUtil.root(),
-      host: window.location.hostname,
-      user: userField.value,
-      pass: passwordField.value,
-      type: 'login',
-      meta: { pendingReason: 'manual-capture-after-signup' }
+    // Show in-page confirmation dialog
+    this.showSaveConfirmationDialog(userField.value, passwordField.value);
+  }
+
+  showSaveConfirmationDialog(username, password) {
+    // Remove any existing dialog
+    const existing = document.querySelector('.passvault-save-dialog');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    const card = document.createElement('div');
+    const title = document.createElement('h3');
+    const details = document.createElement('div');
+    const actions = document.createElement('div');
+    const noBtn = document.createElement('button');
+    const yesBtn = document.createElement('button');
+
+    const close = (save) => {
+      overlay.remove();
+      if (save) {
+        const entry = {
+          site: DomainUtil.root(),
+          host: window.location.hostname,
+          user: username,
+          pass: password,
+          type: 'login',
+          meta: { pendingReason: 'signup-capture-confirmed' }
+        };
+        this.queuePendingCredential(entry);
+        this.showToast('💾 Saved!', true);
+      } else {
+        this.showToast('↩️ Not saved', true);
+      }
     };
 
-    this.queuePendingCredential(entry);
-    this.showToast('💾 Credentials captured. Open PassVault to Save/No.', true);
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: '0',
+      background: 'rgba(5, 8, 20, 0.6)',
+      zIndex: '2147483647',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '20px'
+    });
+
+    Object.assign(card.style, {
+      width: 'min(360px, 92vw)',
+      background: '#16213e',
+      border: '1px solid #0f3460',
+      borderRadius: '12px',
+      padding: '16px',
+      boxShadow: '0 14px 38px rgba(0, 0, 0, 0.45)',
+      color: '#e0e0e0',
+      fontFamily: 'Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif'
+    });
+
+    Object.assign(title.style, { margin: '0 0 12px', fontSize: '16px', color: '#e94560' });
+    title.textContent = 'Save credentials?';
+
+    Object.assign(details.style, { marginBottom: '16px', fontSize: '13px', color: '#8892b0', lineHeight: '1.5' });
+    details.innerHTML = `
+      <div><strong>Site:</strong> ${DomainUtil.root()}</div>
+      <div><strong>User:</strong> ${this.escapeHtml(username)}</div>
+      <div><strong>Password:</strong> ********</div>
+    `;
+
+    Object.assign(actions.style, { display: 'flex', justifyContent: 'flex-end', gap: '8px' });
+
+    noBtn.type = 'button';
+    noBtn.textContent = 'No';
+    Object.assign(noBtn.style, {
+      height: '36px',
+      borderRadius: '8px',
+      border: '1px solid #0f3460',
+      background: '#1a1a2e',
+      color: '#e0e0e0',
+      padding: '0 16px',
+      cursor: 'pointer'
+    });
+
+    yesBtn.type = 'button';
+    yesBtn.textContent = 'Yes';
+    Object.assign(yesBtn.style, {
+      height: '36px',
+      borderRadius: '8px',
+      border: 'none',
+      background: '#e94560',
+      color: 'white',
+      padding: '0 16px',
+      cursor: 'pointer',
+      fontWeight: '600'
+    });
+
+    overlay.addEventListener('click', (evt) => {
+      if (evt.target === overlay) close(false);
+    });
+    noBtn.addEventListener('click', () => close(false));
+    yesBtn.addEventListener('click', () => close(true));
+
+    actions.appendChild(noBtn);
+    actions.appendChild(yesBtn);
+    card.appendChild(title);
+    card.appendChild(details);
+    card.appendChild(actions);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    yesBtn.focus();
+  }
+
+  escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 
   findSignupScope(input, form = null) {
